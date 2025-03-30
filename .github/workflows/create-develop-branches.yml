@@ -20,28 +20,14 @@ jobs:
       - name: Check out repository code
         uses: actions/checkout@v4
       
-      - name: Setup GitHub CLI
-        run: |
-          sudo apt-get update
-          sudo apt-get install gh
-      
-      - name: Configure git and authentication
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+      - name: Configure git
         run: |
           git config --global user.name "GitHub Actions Bot"
           git config --global user.email "actions@github.com"
-          
-          # Set the token for GitHub CLI
-          echo "${{ secrets.PAT_TOKEN }}" | gh auth login --with-token
-          
-          # Explicitly check if token works with the organization
-          echo "Testing token access to organization: ${{ github.event.inputs.organization }}"
-          gh repo list ${{ github.event.inputs.organization }} --limit 1 || echo "WARNING: Could not list repos in organization"
       
       - name: Create develop branches
         env:
-          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+          TOKEN: ${{ secrets.PAT_TOKEN }}
           ORGANIZATION: ${{ github.event.inputs.organization }}
         run: |
           # Define color codes for logging
@@ -65,10 +51,6 @@ jobs:
           
           echo -e "${BLUE}ℹ️ Starting processing of ${#REPOS[@]} repositories${NC}"
           
-          # Verify authentication
-          echo -e "${BLUE}ℹ️ Verifying GitHub authentication...${NC}"
-          gh auth status || echo -e "${RED}❌ GitHub authentication issues detected${NC}"
-          
           # Loop through each repository
           for REPO in "${REPOS[@]}"; do
             REPO=$(echo $REPO | xargs) # Trim whitespace
@@ -76,11 +58,26 @@ jobs:
             
             echo -e "\n${PURPLE}🔄 PROCESSING: $ORGANIZATION/$REPO${NC}"
             
-            # Check if repository exists - use the GitHub CLI with the token
+            # Check if repository exists using curl directly
             echo -e "${BLUE}ℹ️ Checking if repository exists...${NC}"
-            if ! gh repo view "$ORGANIZATION/$REPO"; then
+            REPO_INFO=$(curl -s -H "Authorization: token $TOKEN" \
+              "https://api.github.com/repos/$ORGANIZATION/$REPO")
+            
+            if echo "$REPO_INFO" | grep -q "Not Found"; then
               echo -e "${RED}❌ NOT FOUND: $ORGANIZATION/$REPO${NC}"
               NOT_FOUND=$((NOT_FOUND+1))
+              continue
+            fi
+            
+            echo -e "${BLUE}ℹ️ Repository found: $ORGANIZATION/$REPO${NC}"
+            
+            # Check if develop branch already exists using API
+            BRANCHES=$(curl -s -H "Authorization: token $TOKEN" \
+              "https://api.github.com/repos/$ORGANIZATION/$REPO/branches")
+            
+            if echo "$BRANCHES" | grep -q '"name": "develop"'; then
+              echo -e "${YELLOW}⚠️ SKIPPED ('develop' branch exists): $ORGANIZATION/$REPO${NC}"
+              ALREADY_EXISTS=$((ALREADY_EXISTS+1))
               continue
             fi
             
@@ -88,57 +85,45 @@ jobs:
             TEMP_DIR=$(mktemp -d)
             cd $TEMP_DIR
             
-            # Clone the repository using the token directly in the URL
-            echo -e "${BLUE}ℹ️ Cloning repository...${NC}"
-            git clone "https://${{ secrets.PAT_TOKEN }}@github.com/$ORGANIZATION/$REPO.git" .
-            
-            if [ $? -ne 0 ]; then
-              echo -e "${RED}❌ CLONE FAILED: $ORGANIZATION/$REPO - This could be due to permissions or network issues${NC}"
-              OTHER_ISSUES=$((OTHER_ISSUES+1))
-              cd ..
-              rm -rf $TEMP_DIR
-              continue
+            # Extract default branch
+            DEFAULT_BRANCH=$(echo "$REPO_INFO" | grep '"default_branch"' | cut -d'"' -f4)
+            if [ -z "$DEFAULT_BRANCH" ]; then
+              DEFAULT_BRANCH="main" # fallback to main if we can't determine
             fi
             
-            # Check if develop branch already exists
-            if git ls-remote --heads origin develop | grep develop &>/dev/null; then
-              echo -e "${YELLOW}⚠️ SKIPPED ('develop' branch exists): $ORGANIZATION/$REPO${NC}"
-              ALREADY_EXISTS=$((ALREADY_EXISTS+1))
-              cd ..
-              rm -rf $TEMP_DIR
-              continue
-            fi
+            echo -e "${BLUE}ℹ️ Default branch: $DEFAULT_BRANCH${NC}"
             
-            # Check if repository is empty (no commits/branches)
-            if ! git show-ref --heads &>/dev/null; then
+            # Check if repository is empty
+            COMMITS=$(curl -s -H "Authorization: token $TOKEN" \
+              "https://api.github.com/repos/$ORGANIZATION/$REPO/commits?sha=$DEFAULT_BRANCH")
+            
+            if echo "$COMMITS" | grep -q "\"Not Found\""; then
               echo -e "${BLUE}ℹ️ EMPTY REPOSITORY: $ORGANIZATION/$REPO${NC}"
               echo -e "${BLUE}ℹ️ Creating initial commit and branches...${NC}"
               
-              # Create a README.md file
+              # Initialize the repo with README
               echo -e "# $REPO\n\nInitial repository setup by GitHub Actions." > README.md
-              
-              # Initialize both main and develop branches
+              git init
               git add README.md
               git commit -m "Initial commit"
-              git branch -M main
               
-              # Try to push - handle if it fails
+              # Create main branch and push
+              git branch -M main
+              git remote add origin "https://$TOKEN@github.com/$ORGANIZATION/$REPO.git"
+              
               echo -e "${BLUE}ℹ️ Pushing initial commit to main branch...${NC}"
-              # Use token directly in push URL
-              if ! git push "https://${{ secrets.PAT_TOKEN }}@github.com/$ORGANIZATION/$REPO.git" main; then
+              if ! git push -u origin main; then
                 echo -e "${RED}❌ PUSH FAILED: $ORGANIZATION/$REPO - Could not push to main branch${NC}"
-                echo -e "${RED}   This could be due to branch protection or permissions${NC}"
                 OTHER_ISSUES=$((OTHER_ISSUES+1))
                 cd ..
                 rm -rf $TEMP_DIR
                 continue
               fi
               
+              # Create and push develop branch
               git checkout -b develop
-              
               echo -e "${BLUE}ℹ️ Pushing develop branch...${NC}"
-              # Use token directly in push URL
-              if ! git push "https://${{ secrets.PAT_TOKEN }}@github.com/$ORGANIZATION/$REPO.git" develop; then
+              if ! git push -u origin develop; then
                 echo -e "${RED}❌ PUSH FAILED: $ORGANIZATION/$REPO - Could not push develop branch${NC}"
                 OTHER_ISSUES=$((OTHER_ISSUES+1))
                 cd ..
@@ -149,60 +134,48 @@ jobs:
               echo -e "${GREEN}✅ SUCCESS (created both 'main' and 'develop' branches): $ORGANIZATION/$REPO${NC}"
               SUCCESS=$((SUCCESS+1))
               EMPTY=$((EMPTY+1))
-              cd ..
-              rm -rf $TEMP_DIR
-              continue
-            fi
-            
-            # Determine source branch - try to detect default branch
-            DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
-            
-            if [ -n "$DEFAULT_BRANCH" ]; then
-              # Found default branch from repo settings
-              SOURCE_BRANCH="$DEFAULT_BRANCH"
-              echo -e "${BLUE}ℹ️ Using detected default branch: $SOURCE_BRANCH${NC}"
-            elif git ls-remote --heads origin main | grep main &>/dev/null; then
-              SOURCE_BRANCH="main"
-              echo -e "${BLUE}ℹ️ Using 'main' branch${NC}"
-            elif git ls-remote --heads origin master | grep master &>/dev/null; then
-              SOURCE_BRANCH="master"
-              echo -e "${BLUE}ℹ️ Using 'master' branch${NC}" 
+              
             else
-              echo -e "${RED}❌ NO DEFAULT BRANCH: $ORGANIZATION/$REPO - Could not find main or master${NC}"
-              OTHER_ISSUES=$((OTHER_ISSUES+1))
-              cd ..
-              rm -rf $TEMP_DIR
-              continue
-            fi
-            
-            # Create develop branch from the source branch
-            echo -e "${BLUE}ℹ️ Creating 'develop' branch from '$SOURCE_BRANCH'...${NC}"
-            
-            # Try 3 times in case of network issues
-            MAX_RETRIES=3
-            SUCCESS_CREATE=false
-            
-            for i in $(seq 1 $MAX_RETRIES); do
-              if git fetch origin $SOURCE_BRANCH && \
-                 git checkout -b develop origin/$SOURCE_BRANCH && \
-                 git push "https://${{ secrets.PAT_TOKEN }}@github.com/$ORGANIZATION/$REPO.git" develop; then
-                SUCCESS_CREATE=true
-                break
+              # Repository has commits, clone it
+              echo -e "${BLUE}ℹ️ Cloning repository...${NC}"
+              git clone "https://$TOKEN@github.com/$ORGANIZATION/$REPO.git" .
+              
+              if [ $? -ne 0 ]; then
+                echo -e "${RED}❌ CLONE FAILED: $ORGANIZATION/$REPO - This could be due to permissions or network issues${NC}"
+                OTHER_ISSUES=$((OTHER_ISSUES+1))
+                cd ..
+                rm -rf $TEMP_DIR
+                continue
               fi
               
-              if [ $i -lt $MAX_RETRIES ]; then
-                echo -e "${YELLOW}⚠️ Retry $i/$MAX_RETRIES - Failed to create branch, trying again...${NC}"
-                sleep 2
+              # Create develop branch from default branch
+              echo -e "${BLUE}ℹ️ Creating 'develop' branch from '$DEFAULT_BRANCH'...${NC}"
+              
+              # Try 3 times in case of network issues
+              MAX_RETRIES=3
+              SUCCESS_CREATE=false
+              
+              for i in $(seq 1 $MAX_RETRIES); do
+                if git checkout $DEFAULT_BRANCH && \
+                   git checkout -b develop && \
+                   git push -u origin develop; then
+                  SUCCESS_CREATE=true
+                  break
+                fi
+                
+                if [ $i -lt $MAX_RETRIES ]; then
+                  echo -e "${YELLOW}⚠️ Retry $i/$MAX_RETRIES - Failed to create branch, trying again...${NC}"
+                  sleep 2
+                fi
+              done
+              
+              if [ "$SUCCESS_CREATE" = true ]; then
+                echo -e "${GREEN}✅ SUCCESS (created 'develop' branch): $ORGANIZATION/$REPO${NC}"
+                SUCCESS=$((SUCCESS+1))
+              else
+                echo -e "${RED}❌ FAILED: $ORGANIZATION/$REPO - Could not create 'develop' branch after $MAX_RETRIES attempts${NC}"
+                OTHER_ISSUES=$((OTHER_ISSUES+1))
               fi
-            done
-            
-            if [ "$SUCCESS_CREATE" = true ]; then
-              echo -e "${GREEN}✅ SUCCESS (created 'develop' branch): $ORGANIZATION/$REPO${NC}"
-              SUCCESS=$((SUCCESS+1))
-            else
-              echo -e "${RED}❌ FAILED: $ORGANIZATION/$REPO - Could not create 'develop' branch after $MAX_RETRIES attempts${NC}"
-              echo -e "${RED}   This could be due to network issues or branch protection${NC}"
-              OTHER_ISSUES=$((OTHER_ISSUES+1))
             fi
             
             # Clean up
