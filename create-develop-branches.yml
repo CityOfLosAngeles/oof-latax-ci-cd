@@ -1,0 +1,199 @@
+name: Create Develop Branches
+
+on:
+  # Manual trigger with input parameters
+  workflow_dispatch:
+    inputs:
+      repositories:
+        description: 'List of repositories (comma-separated, e.g., "repo1,repo2,repo3")'
+        required: true
+        type: string
+      organization:
+        description: 'GitHub organization name'
+        required: true
+        default: 'vishnu-parandhaman'
+        type: string
+
+jobs:
+  create-develop-branches:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+        
+      - name: Setup GitHub CLI
+        uses: cli/cli-action@v1
+      
+      - name: Configure git
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+      
+      - name: Create develop branches
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          ORGANIZATION: ${{ github.event.inputs.organization }}
+        run: |
+          # Define color codes for logging
+          RED='\033[0;31m'
+          GREEN='\033[0;32m'
+          YELLOW='\033[0;33m'
+          BLUE='\033[0;34m'
+          PURPLE='\033[0;35m'
+          NC='\033[0m' # No Color
+          
+          # Initialize counters for summary
+          TOTAL=0
+          SUCCESS=0
+          ALREADY_EXISTS=0
+          NOT_FOUND=0
+          EMPTY=0
+          OTHER_ISSUES=0
+          
+          # Convert comma-separated list to array
+          IFS=',' read -ra REPOS <<< "${{ github.event.inputs.repositories }}"
+          
+          echo -e "${BLUE}ℹ️ Starting processing of ${#REPOS[@]} repositories${NC}"
+          
+          # Loop through each repository
+          for REPO in "${REPOS[@]}"; do
+            REPO=$(echo $REPO | xargs) # Trim whitespace
+            TOTAL=$((TOTAL+1))
+            
+            echo -e "\n${PURPLE}🔄 PROCESSING: $ORGANIZATION/$REPO${NC}"
+            
+            # Check if repository exists
+            if ! gh repo view "$ORGANIZATION/$REPO" &>/dev/null; then
+              echo -e "${RED}❌ NOT FOUND: $ORGANIZATION/$REPO${NC}"
+              NOT_FOUND=$((NOT_FOUND+1))
+              continue
+            fi
+            
+            # Create a temporary directory for cloning
+            TEMP_DIR=$(mktemp -d)
+            cd $TEMP_DIR
+            
+            # Clone the repository (shallow clone for speed)
+            echo -e "${BLUE}ℹ️ Cloning repository...${NC}"
+            if ! gh repo clone "$ORGANIZATION/$REPO" . &>/dev/null; then
+              echo -e "${RED}❌ CLONE FAILED: $ORGANIZATION/$REPO - This could be due to permissions or network issues${NC}"
+              OTHER_ISSUES=$((OTHER_ISSUES+1))
+              cd ..
+              rm -rf $TEMP_DIR
+              continue
+            fi
+            
+            # Check if develop branch already exists
+            if git ls-remote --heads origin develop | grep develop &>/dev/null; then
+              echo -e "${YELLOW}⚠️ SKIPPED ('develop' branch exists): $ORGANIZATION/$REPO${NC}"
+              ALREADY_EXISTS=$((ALREADY_EXISTS+1))
+              cd ..
+              rm -rf $TEMP_DIR
+              continue
+            fi
+            
+            # Check if repository is empty (no commits/branches)
+            if ! git show-ref --heads &>/dev/null; then
+              echo -e "${BLUE}ℹ️ EMPTY REPOSITORY: $ORGANIZATION/$REPO${NC}"
+              echo -e "${BLUE}ℹ️ Creating initial commit and branches...${NC}"
+              
+              # Create a README.md file
+              echo "# $REPO\n\nInitial repository setup by GitHub Actions." > README.md
+              
+              # Initialize both main and develop branches
+              git add README.md
+              git commit -m "Initial commit"
+              git branch -M main
+              
+              # Try to push - handle if it fails
+              if ! git push -u origin main &>/dev/null; then
+                echo -e "${RED}❌ PUSH FAILED: $ORGANIZATION/$REPO - Could not push to main branch${NC}"
+                echo -e "${RED}   This could be due to branch protection or permissions${NC}"
+                OTHER_ISSUES=$((OTHER_ISSUES+1))
+                cd ..
+                rm -rf $TEMP_DIR
+                continue
+              fi
+              
+              git checkout -b develop
+              
+              if ! git push -u origin develop &>/dev/null; then
+                echo -e "${RED}❌ PUSH FAILED: $ORGANIZATION/$REPO - Could not push develop branch${NC}"
+                OTHER_ISSUES=$((OTHER_ISSUES+1))
+                cd ..
+                rm -rf $TEMP_DIR
+                continue
+              fi
+              
+              echo -e "${GREEN}✅ SUCCESS (created both 'main' and 'develop' branches): $ORGANIZATION/$REPO${NC}"
+              SUCCESS=$((SUCCESS+1))
+              EMPTY=$((EMPTY+1))
+              cd ..
+              rm -rf $TEMP_DIR
+              continue
+            fi
+            
+            # Determine source branch - try to detect default branch
+            DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
+            
+            if [ -n "$DEFAULT_BRANCH" ]; then
+              # Found default branch from repo settings
+              SOURCE_BRANCH="$DEFAULT_BRANCH"
+              echo -e "${BLUE}ℹ️ Using detected default branch: $SOURCE_BRANCH${NC}"
+            elif git ls-remote --heads origin main | grep main &>/dev/null; then
+              SOURCE_BRANCH="main"
+              echo -e "${BLUE}ℹ️ Using 'main' branch${NC}"
+            elif git ls-remote --heads origin master | grep master &>/dev/null; then
+              SOURCE_BRANCH="master"
+              echo -e "${BLUE}ℹ️ Using 'master' branch${NC}" 
+            else
+              echo -e "${RED}❌ NO DEFAULT BRANCH: $ORGANIZATION/$REPO - Could not find main or master${NC}"
+              OTHER_ISSUES=$((OTHER_ISSUES+1))
+              cd ..
+              rm -rf $TEMP_DIR
+              continue
+            fi
+            
+            # Create develop branch from the source branch
+            echo -e "${BLUE}ℹ️ Creating 'develop' branch from '$SOURCE_BRANCH'...${NC}"
+            
+            # Try 3 times in case of network issues
+            MAX_RETRIES=3
+            SUCCESS_CREATE=false
+            
+            for i in $(seq 1 $MAX_RETRIES); do
+              if git fetch origin $SOURCE_BRANCH && \
+                 git checkout -b develop origin/$SOURCE_BRANCH && \
+                 git push origin develop; then
+                SUCCESS_CREATE=true
+                break
+              fi
+              
+              if [ $i -lt $MAX_RETRIES ]; then
+                echo -e "${YELLOW}⚠️ Retry $i/$MAX_RETRIES - Failed to create branch, trying again...${NC}"
+                sleep 2
+              fi
+            done
+            
+            if [ "$SUCCESS_CREATE" = true ]; then
+              echo -e "${GREEN}✅ SUCCESS (created 'develop' branch): $ORGANIZATION/$REPO${NC}"
+              SUCCESS=$((SUCCESS+1))
+            else
+              echo -e "${RED}❌ FAILED: $ORGANIZATION/$REPO - Could not create 'develop' branch after $MAX_RETRIES attempts${NC}"
+              echo -e "${RED}   This could be due to network issues or branch protection${NC}"
+              OTHER_ISSUES=$((OTHER_ISSUES+1))
+            fi
+            
+            # Clean up
+            cd ..
+            rm -rf $TEMP_DIR
+          done
+          
+          # Print summary
+          echo -e "\n${BLUE}ℹ️ SUMMARY${NC}"
+          echo -e "${BLUE}ℹ️ Total repositories processed: $TOTAL${NC}"
+          echo -e "${GREEN}✅ Successfully created 'develop' branch: $SUCCESS${NC}"
+          echo -e "${YELLOW}⚠️ Repositories with existing 'develop' branch: $ALREADY_EXISTS${NC}"
+          echo -e "${BLUE}ℹ️ Empty repositories initialized: $EMPTY${NC}"
+          echo -e "${RED}❌ Repositories not found: $NOT_FOUND${NC}"
+          echo -e "${RED}❌ Repositories with other issues: $OTHER_ISSUES${NC}"
