@@ -20,10 +20,11 @@ jobs:
       - name: Check out repository code
         uses: actions/checkout@v4
       
-      - name: Setup GitHub CLI
+      - name: Setup GitHub CLI and authenticate
         run: |
           sudo apt-get update
           sudo apt-get install gh
+          echo "${{ secrets.PAT_TOKEN }}" | gh auth login --with-token
       
       - name: Configure git
         run: |
@@ -33,6 +34,7 @@ jobs:
       - name: Create develop branches
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
           ORGANIZATION: ${{ github.event.inputs.organization }}
         run: |
           # Define color codes for logging
@@ -56,6 +58,10 @@ jobs:
           
           echo -e "${BLUE}ℹ️ Starting processing of ${#REPOS[@]} repositories${NC}"
           
+          # Verify authentication
+          echo -e "${BLUE}ℹ️ Verifying GitHub authentication...${NC}"
+          gh auth status || echo -e "${RED}❌ GitHub authentication issues detected${NC}"
+          
           # Loop through each repository
           for REPO in "${REPOS[@]}"; do
             REPO=$(echo $REPO | xargs) # Trim whitespace
@@ -64,7 +70,8 @@ jobs:
             echo -e "\n${PURPLE}🔄 PROCESSING: $ORGANIZATION/$REPO${NC}"
             
             # Check if repository exists
-            if ! gh repo view "$ORGANIZATION/$REPO" &>/dev/null; then
+            echo -e "${BLUE}ℹ️ Checking if repository exists...${NC}"
+            if ! gh repo view "$ORGANIZATION/$REPO" 2>/dev/null; then
               echo -e "${RED}❌ NOT FOUND: $ORGANIZATION/$REPO${NC}"
               NOT_FOUND=$((NOT_FOUND+1))
               continue
@@ -76,7 +83,7 @@ jobs:
             
             # Clone the repository (shallow clone for speed)
             echo -e "${BLUE}ℹ️ Cloning repository...${NC}"
-            if ! gh repo clone "$ORGANIZATION/$REPO" . &>/dev/null; then
+            if ! git clone "https://oauth2:${GH_TOKEN}@github.com/$ORGANIZATION/$REPO.git" . 2>/dev/null; then
               echo -e "${RED}❌ CLONE FAILED: $ORGANIZATION/$REPO - This could be due to permissions or network issues${NC}"
               OTHER_ISSUES=$((OTHER_ISSUES+1))
               cd ..
