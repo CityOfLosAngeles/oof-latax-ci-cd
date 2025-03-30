@@ -58,7 +58,7 @@ jobs:
             
             echo -e "\n${PURPLE}🔄 PROCESSING: $ORGANIZATION/$REPO${NC}"
             
-            # Check if repository exists using curl directly
+            # Step 1: Check if repository exists
             echo -e "${BLUE}ℹ️ Checking if repository exists...${NC}"
             REPO_INFO=$(curl -s -H "Authorization: token $TOKEN" \
               "https://api.github.com/repos/$ORGANIZATION/$REPO")
@@ -71,7 +71,8 @@ jobs:
             
             echo -e "${BLUE}ℹ️ Repository found: $ORGANIZATION/$REPO${NC}"
             
-            # Check if develop branch already exists using API
+            # Step 2: Check if develop branch already exists
+            echo -e "${BLUE}ℹ️ Checking if develop branch exists...${NC}"
             BRANCHES=$(curl -s -H "Authorization: token $TOKEN" \
               "https://api.github.com/repos/$ORGANIZATION/$REPO/branches")
             
@@ -81,102 +82,71 @@ jobs:
               continue
             fi
             
-            # Create a temporary directory for cloning
-            TEMP_DIR=$(mktemp -d)
-            cd $TEMP_DIR
+            # Step 3: Check if repository is empty
+            echo -e "${BLUE}ℹ️ Checking if repository has content...${NC}"
             
-            # Extract default branch
+            # Get default branch name
             DEFAULT_BRANCH=$(echo "$REPO_INFO" | grep '"default_branch"' | cut -d'"' -f4)
             if [ -z "$DEFAULT_BRANCH" ]; then
               DEFAULT_BRANCH="main" # fallback to main if we can't determine
             fi
             
-            echo -e "${BLUE}ℹ️ Default branch: $DEFAULT_BRANCH${NC}"
-            
-            # Check if repository is empty
+            # Check if default branch has any commits
             COMMITS=$(curl -s -H "Authorization: token $TOKEN" \
               "https://api.github.com/repos/$ORGANIZATION/$REPO/commits?sha=$DEFAULT_BRANCH")
             
-            if echo "$COMMITS" | grep -q "\"Not Found\""; then
-              echo -e "${BLUE}ℹ️ EMPTY REPOSITORY: $ORGANIZATION/$REPO${NC}"
-              echo -e "${BLUE}ℹ️ Creating initial commit and branches...${NC}"
-              
-              # Initialize the repo with README
-              echo -e "# $REPO\n\nInitial repository setup by GitHub Actions." > README.md
-              git init
-              git add README.md
-              git commit -m "Initial commit"
-              
-              # Create main branch and push
-              git branch -M main
-              git remote add origin "https://$TOKEN@github.com/$ORGANIZATION/$REPO.git"
-              
-              echo -e "${BLUE}ℹ️ Pushing initial commit to main branch...${NC}"
-              if ! git push -u origin main; then
-                echo -e "${RED}❌ PUSH FAILED: $ORGANIZATION/$REPO - Could not push to main branch${NC}"
-                OTHER_ISSUES=$((OTHER_ISSUES+1))
-                cd ..
-                rm -rf $TEMP_DIR
-                continue
-              fi
-              
-              # Create and push develop branch
-              git checkout -b develop
-              echo -e "${BLUE}ℹ️ Pushing develop branch...${NC}"
-              if ! git push -u origin develop; then
-                echo -e "${RED}❌ PUSH FAILED: $ORGANIZATION/$REPO - Could not push develop branch${NC}"
-                OTHER_ISSUES=$((OTHER_ISSUES+1))
-                cd ..
-                rm -rf $TEMP_DIR
-                continue
-              fi
-              
-              echo -e "${GREEN}✅ SUCCESS (created both 'main' and 'develop' branches): $ORGANIZATION/$REPO${NC}"
-              SUCCESS=$((SUCCESS+1))
+            # If commits returns an empty array or "Not Found", the repo is empty
+            if [ "$COMMITS" = "[]" ] || echo "$COMMITS" | grep -q "Not Found"; then
+              echo -e "${YELLOW}⚠️ SKIPPED (empty repository): $ORGANIZATION/$REPO${NC}"
               EMPTY=$((EMPTY+1))
-              
-            else
-              # Repository has commits, clone it
-              echo -e "${BLUE}ℹ️ Cloning repository...${NC}"
-              git clone "https://$TOKEN@github.com/$ORGANIZATION/$REPO.git" .
-              
-              if [ $? -ne 0 ]; then
-                echo -e "${RED}❌ CLONE FAILED: $ORGANIZATION/$REPO - This could be due to permissions or network issues${NC}"
-                OTHER_ISSUES=$((OTHER_ISSUES+1))
-                cd ..
-                rm -rf $TEMP_DIR
-                continue
-              fi
-              
-              # Create develop branch from default branch
-              echo -e "${BLUE}ℹ️ Creating 'develop' branch from '$DEFAULT_BRANCH'...${NC}"
-              
-              # Try 3 times in case of network issues
-              MAX_RETRIES=3
-              SUCCESS_CREATE=false
-              
-              for i in $(seq 1 $MAX_RETRIES); do
-                if git checkout $DEFAULT_BRANCH && \
-                   git checkout -b develop && \
-                   git push -u origin develop; then
-                  SUCCESS_CREATE=true
-                  break
-                fi
-                
-                if [ $i -lt $MAX_RETRIES ]; then
-                  echo -e "${YELLOW}⚠️ Retry $i/$MAX_RETRIES - Failed to create branch, trying again...${NC}"
-                  sleep 2
-                fi
-              done
-              
-              if [ "$SUCCESS_CREATE" = true ]; then
-                echo -e "${GREEN}✅ SUCCESS (created 'develop' branch): $ORGANIZATION/$REPO${NC}"
-                SUCCESS=$((SUCCESS+1))
-              else
-                echo -e "${RED}❌ FAILED: $ORGANIZATION/$REPO - Could not create 'develop' branch after $MAX_RETRIES attempts${NC}"
-                OTHER_ISSUES=$((OTHER_ISSUES+1))
-              fi
+              continue
             fi
+            
+            echo -e "${BLUE}ℹ️ Repository has content on branch '$DEFAULT_BRANCH'${NC}"
+            
+            # Step 4: Create develop branch from default branch for repositories with content
+            TEMP_DIR=$(mktemp -d)
+            cd $TEMP_DIR
+            
+            echo -e "${BLUE}ℹ️ Cloning repository...${NC}"
+            git clone "https://$TOKEN@github.com/$ORGANIZATION/$REPO.git" .
+            
+            if [ $? -ne 0 ]; then
+              echo -e "${RED}❌ CLONE FAILED: $ORGANIZATION/$REPO - This could be due to permissions or network issues${NC}"
+              OTHER_ISSUES=$((OTHER_ISSUES+1))
+              cd ..
+              rm -rf $TEMP_DIR
+              continue
+            fi
+            
+            echo -e "${BLUE}ℹ️ Creating 'develop' branch from '$DEFAULT_BRANCH'...${NC}"
+            
+            if ! git checkout $DEFAULT_BRANCH; then
+              echo -e "${RED}❌ CHECKOUT FAILED: $ORGANIZATION/$REPO - Could not checkout $DEFAULT_BRANCH branch${NC}"
+              OTHER_ISSUES=$((OTHER_ISSUES+1))
+              cd ..
+              rm -rf $TEMP_DIR
+              continue
+            fi
+            
+            if ! git checkout -b develop; then
+              echo -e "${RED}❌ BRANCH CREATION FAILED: $ORGANIZATION/$REPO - Could not create develop branch${NC}"
+              OTHER_ISSUES=$((OTHER_ISSUES+1))
+              cd ..
+              rm -rf $TEMP_DIR
+              continue
+            fi
+            
+            if ! git push -u origin develop; then
+              echo -e "${RED}❌ PUSH FAILED: $ORGANIZATION/$REPO - Could not push develop branch${NC}"
+              OTHER_ISSUES=$((OTHER_ISSUES+1))
+              cd ..
+              rm -rf $TEMP_DIR
+              continue
+            fi
+            
+            echo -e "${GREEN}✅ SUCCESS (created 'develop' branch): $ORGANIZATION/$REPO${NC}"
+            SUCCESS=$((SUCCESS+1))
             
             # Clean up
             cd ..
@@ -188,6 +158,6 @@ jobs:
           echo -e "${BLUE}ℹ️ Total repositories processed: $TOTAL${NC}"
           echo -e "${GREEN}✅ Successfully created 'develop' branch: $SUCCESS${NC}"
           echo -e "${YELLOW}⚠️ Repositories with existing 'develop' branch: $ALREADY_EXISTS${NC}"
-          echo -e "${BLUE}ℹ️ Empty repositories initialized: $EMPTY${NC}"
+          echo -e "${YELLOW}⚠️ Empty repositories skipped: $EMPTY${NC}"
           echo -e "${RED}❌ Repositories not found: $NOT_FOUND${NC}"
           echo -e "${RED}❌ Repositories with other issues: $OTHER_ISSUES${NC}"
