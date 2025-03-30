@@ -82,32 +82,11 @@ jobs:
               continue
             fi
             
-            # Step 3: Check if repository is empty
-            echo -e "${BLUE}ℹ️ Checking if repository has content...${NC}"
-            
-            # Get default branch name
-            DEFAULT_BRANCH=$(echo "$REPO_INFO" | grep '"default_branch"' | cut -d'"' -f4)
-            if [ -z "$DEFAULT_BRANCH" ]; then
-              DEFAULT_BRANCH="main" # fallback to main if we can't determine
-            fi
-            
-            # Check if default branch has any commits
-            COMMITS=$(curl -s -H "Authorization: token $TOKEN" \
-              "https://api.github.com/repos/$ORGANIZATION/$REPO/commits?sha=$DEFAULT_BRANCH")
-            
-            # If commits returns an empty array or "Not Found", the repo is empty
-            if [ "$COMMITS" = "[]" ] || echo "$COMMITS" | grep -q "Not Found"; then
-              echo -e "${YELLOW}⚠️ SKIPPED (empty repository): $ORGANIZATION/$REPO${NC}"
-              EMPTY=$((EMPTY+1))
-              continue
-            fi
-            
-            echo -e "${BLUE}ℹ️ Repository has content on branch '$DEFAULT_BRANCH'${NC}"
-            
-            # Step 4: Create develop branch from default branch for repositories with content
+            # Create a temporary directory for cloning
             TEMP_DIR=$(mktemp -d)
             cd $TEMP_DIR
             
+            # Try to clone the repository
             echo -e "${BLUE}ℹ️ Cloning repository...${NC}"
             git clone "https://$TOKEN@github.com/$ORGANIZATION/$REPO.git" .
             
@@ -119,6 +98,33 @@ jobs:
               continue
             fi
             
+            # Check if repository is truly empty (has no branches)
+            if ! git show-ref --heads &>/dev/null; then
+              echo -e "${YELLOW}⚠️ SKIPPED (truly empty repository with no branches): $ORGANIZATION/$REPO${NC}"
+              EMPTY=$((EMPTY+1))
+              cd ..
+              rm -rf $TEMP_DIR
+              continue
+            fi
+            
+            # Get default branch
+            DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
+            if [ -z "$DEFAULT_BRANCH" ]; then
+              # Try to find any branch if HEAD is not set
+              DEFAULT_BRANCH=$(git branch -r | grep -v '\->' | sed 's/origin\///' | head -n 1)
+              
+              if [ -z "$DEFAULT_BRANCH" ]; then
+                echo -e "${YELLOW}⚠️ SKIPPED (no default branch found): $ORGANIZATION/$REPO${NC}"
+                EMPTY=$((EMPTY+1))
+                cd ..
+                rm -rf $TEMP_DIR
+                continue
+              fi
+            fi
+            
+            echo -e "${BLUE}ℹ️ Using '$DEFAULT_BRANCH' as source branch${NC}"
+            
+            # Create develop branch from default branch
             echo -e "${BLUE}ℹ️ Creating 'develop' branch from '$DEFAULT_BRANCH'...${NC}"
             
             if ! git checkout $DEFAULT_BRANCH; then
