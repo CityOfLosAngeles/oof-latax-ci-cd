@@ -20,22 +20,24 @@ jobs:
       - name: Check out repository code
         uses: actions/checkout@v4
       
-      - name: Setup GitHub CLI and authenticate
+      - name: Setup GitHub CLI
         run: |
           sudo apt-get update
           sudo apt-get install gh
-          echo "${{ secrets.PAT_TOKEN }}" | gh auth login --with-token
       
-      - name: Configure git
+      - name: Configure git and authentication
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           git config --global user.name "GitHub Actions Bot"
           git config --global user.email "actions@github.com"
-          # Configure git to store credentials
-          git config --global credential.helper store
-          # Store the credentials
-          echo "https://${{ secrets.PAT_TOKEN }}:x-oauth-basic@github.com" > ~/.git-credentials
-          # Make the credentials file secure
-          chmod 600 ~/.git-credentials
+          
+          # Set the token for GitHub CLI
+          echo "${{ secrets.PAT_TOKEN }}" | gh auth login --with-token
+          
+          # Explicitly check if token works with the organization
+          echo "Testing token access to organization: ${{ github.event.inputs.organization }}"
+          gh repo list ${{ github.event.inputs.organization }} --limit 1 || echo "WARNING: Could not list repos in organization"
       
       - name: Create develop branches
         env:
@@ -74,7 +76,7 @@ jobs:
             
             echo -e "\n${PURPLE}🔄 PROCESSING: $ORGANIZATION/$REPO${NC}"
             
-            # Check if repository exists
+            # Check if repository exists - use the GitHub CLI with the token
             echo -e "${BLUE}ℹ️ Checking if repository exists...${NC}"
             if ! gh repo view "$ORGANIZATION/$REPO"; then
               echo -e "${RED}❌ NOT FOUND: $ORGANIZATION/$REPO${NC}"
@@ -86,9 +88,9 @@ jobs:
             TEMP_DIR=$(mktemp -d)
             cd $TEMP_DIR
             
-            # Clone the repository using standard URL (credentials handled by git config)
+            # Clone the repository using the token directly in the URL
             echo -e "${BLUE}ℹ️ Cloning repository...${NC}"
-            git clone "https://github.com/$ORGANIZATION/$REPO.git" .
+            git clone "https://${{ secrets.PAT_TOKEN }}@github.com/$ORGANIZATION/$REPO.git" .
             
             if [ $? -ne 0 ]; then
               echo -e "${RED}❌ CLONE FAILED: $ORGANIZATION/$REPO - This could be due to permissions or network issues${NC}"
@@ -122,7 +124,8 @@ jobs:
               
               # Try to push - handle if it fails
               echo -e "${BLUE}ℹ️ Pushing initial commit to main branch...${NC}"
-              if ! git push -u origin main; then
+              # Use token directly in push URL
+              if ! git push "https://${{ secrets.PAT_TOKEN }}@github.com/$ORGANIZATION/$REPO.git" main; then
                 echo -e "${RED}❌ PUSH FAILED: $ORGANIZATION/$REPO - Could not push to main branch${NC}"
                 echo -e "${RED}   This could be due to branch protection or permissions${NC}"
                 OTHER_ISSUES=$((OTHER_ISSUES+1))
@@ -134,7 +137,8 @@ jobs:
               git checkout -b develop
               
               echo -e "${BLUE}ℹ️ Pushing develop branch...${NC}"
-              if ! git push -u origin develop; then
+              # Use token directly in push URL
+              if ! git push "https://${{ secrets.PAT_TOKEN }}@github.com/$ORGANIZATION/$REPO.git" develop; then
                 echo -e "${RED}❌ PUSH FAILED: $ORGANIZATION/$REPO - Could not push develop branch${NC}"
                 OTHER_ISSUES=$((OTHER_ISSUES+1))
                 cd ..
@@ -181,7 +185,7 @@ jobs:
             for i in $(seq 1 $MAX_RETRIES); do
               if git fetch origin $SOURCE_BRANCH && \
                  git checkout -b develop origin/$SOURCE_BRANCH && \
-                 git push origin develop; then
+                 git push "https://${{ secrets.PAT_TOKEN }}@github.com/$ORGANIZATION/$REPO.git" develop; then
                 SUCCESS_CREATE=true
                 break
               fi
