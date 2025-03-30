@@ -24,7 +24,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install gh
-          gh auth login --with-token < ${{ secrets.GITHUB_TOKEN }}
       
       - name: Configure git
         run: |
@@ -100,7 +99,7 @@ jobs:
               echo -e "${BLUE}ℹ️ Creating initial commit and branches...${NC}"
               
               # Create a README.md file
-              echo "# $REPO\n\nInitial repository setup by GitHub Actions." > README.md
+              echo -e "# $REPO\n\nInitial repository setup by GitHub Actions." > README.md
               
               # Initialize both main and develop branches
               git add README.md
