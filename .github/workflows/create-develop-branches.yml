@@ -1,7 +1,6 @@
 name: Create Develop Branches
 
 on:
-  # Manual trigger with input parameters
   workflow_dispatch:
     inputs:
       repositories:
@@ -20,9 +19,12 @@ jobs:
     steps:
       - name: Check out repository code
         uses: actions/checkout@v4
-        
+      
       - name: Setup GitHub CLI
-        uses: cli/cli-action@v1
+        run: |
+          sudo apt-get update
+          sudo apt-get install gh
+          gh auth login --with-token < ${{ secrets.GITHUB_TOKEN }}
       
       - name: Configure git
         run: |
