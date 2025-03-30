@@ -1,0 +1,173 @@
+name: Apply Branch Protection Rules
+
+on:
+  workflow_dispatch:
+    inputs:
+      repositories:
+        description: 'List of repositories (comma-separated, e.g., "repo1,repo2,repo3")'
+        required: false
+        type: string
+      prefix:
+        description: 'Repository prefix to filter by (e.g., "oof-latax-")'
+        required: false
+        default: 'oof-latax-'
+        type: string
+      organization:
+        description: 'GitHub organization name'
+        required: true
+        default: 'vishnu-parandhaman'
+        type: string
+
+jobs:
+  apply-branch-protection:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+      
+      - name: Configure git
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+      
+      - name: Apply branch protection rules
+        env:
+          TOKEN: ${{ secrets.PAT_TOKEN }}
+          ORGANIZATION: ${{ github.event.inputs.organization }}
+          PREFIX: ${{ github.event.inputs.prefix }}
+        run: |
+          # Define color codes for logging
+          RED='\033[0;31m'
+          GREEN='\033[0;32m'
+          YELLOW='\033[0;33m'
+          BLUE='\033[0;34m'
+          PURPLE='\033[0;35m'
+          NC='\033[0m' # No Color
+          
+          # Initialize counters for summary
+          TOTAL=0
+          PROTECTED=0
+          ALREADY_PROTECTED=0
+          NOT_FOUND=0
+          OTHER_ISSUES=0
+          
+          # Branches to protect
+          BRANCHES=("main" "develop" "master")
+          
+          # Get list of repositories
+          if [ -n "${{ github.event.inputs.repositories }}" ]; then
+            # Use the provided repository list
+            IFS=',' read -ra REPOS <<< "${{ github.event.inputs.repositories }}"
+            echo -e "${BLUE}ℹ️ Using explicitly provided repository list${NC}"
+          else
+            # Fetch repositories matching the prefix
+            echo -e "${BLUE}ℹ️ Fetching repositories with prefix: $PREFIX${NC}"
+            
+            # Get repositories from GitHub API
+            REPOS_JSON=$(curl -s -H "Authorization: token $TOKEN" \
+              "https://api.github.com/orgs/$ORGANIZATION/repos?per_page=100")
+            
+            # Extract repo names that match the prefix
+            REPOS=()
+            for REPO_NAME in $(echo "$REPOS_JSON" | grep -o "\"name\": \"$PREFIX[^\"]*\"" | cut -d'"' -f4); do
+              REPOS+=("$REPO_NAME")
+            done
+            
+            # Check if we found any matching repos
+            if [ ${#REPOS[@]} -eq 0 ]; then
+              echo -e "${RED}❌ No repositories found matching prefix: $PREFIX${NC}"
+              exit 1
+            fi
+            
+            echo -e "${BLUE}ℹ️ Found ${#REPOS[@]} repositories matching prefix: $PREFIX${NC}"
+          fi
+          
+          echo -e "${BLUE}ℹ️ Starting protection of branches across ${#REPOS[@]} repositories${NC}"
+          
+          # Loop through each repository
+          for REPO in "${REPOS[@]}"; do
+            REPO=$(echo $REPO | xargs) # Trim whitespace
+            TOTAL=$((TOTAL+1))
+            
+            echo -e "\n${PURPLE}🔄 PROCESSING: $ORGANIZATION/$REPO${NC}"
+            
+            # Step 1: Check if repository exists
+            echo -e "${BLUE}ℹ️ Checking if repository exists...${NC}"
+            REPO_INFO=$(curl -s -H "Authorization: token $TOKEN" \
+              "https://api.github.com/repos/$ORGANIZATION/$REPO")
+            
+            if echo "$REPO_INFO" | grep -q "Not Found"; then
+              echo -e "${RED}❌ NOT FOUND: $ORGANIZATION/$REPO${NC}"
+              NOT_FOUND=$((NOT_FOUND+1))
+              continue
+            fi
+            
+            echo -e "${BLUE}ℹ️ Repository found: $ORGANIZATION/$REPO${NC}"
+            
+            # Step 2: Apply protection rules to each branch
+            REPO_PROTECTED=0
+            REPO_ALREADY_PROTECTED=0
+            
+            for BRANCH in "${BRANCHES[@]}"; do
+              echo -e "${BLUE}ℹ️ Setting up protection for branch: $BRANCH${NC}"
+              
+              # Check if branch protection already exists
+              PROTECTION_INFO=$(curl -s -H "Authorization: token $TOKEN" \
+                "https://api.github.com/repos/$ORGANIZATION/$REPO/branches/$BRANCH/protection")
+              
+              if echo "$PROTECTION_INFO" | grep -q "Branch not found"; then
+                echo -e "${YELLOW}⚠️ Branch '$BRANCH' does not exist yet, but will apply protection for future${NC}"
+              elif ! echo "$PROTECTION_INFO" | grep -q "Not Found"; then
+                echo -e "${YELLOW}⚠️ Branch '$BRANCH' already has some protection rules${NC}"
+                REPO_ALREADY_PROTECTED=$((REPO_ALREADY_PROTECTED+1))
+                ALREADY_PROTECTED=$((ALREADY_PROTECTED+1))
+                continue
+              fi
+              
+              # Apply branch protection rules
+              PROTECTION_PAYLOAD='{
+                "required_status_checks": null,
+                "enforce_admins": true,
+                "required_pull_request_reviews": {
+                  "dismissal_restrictions": {},
+                  "dismiss_stale_reviews": true,
+                  "require_code_owner_reviews": false,
+                  "required_approving_review_count": 1
+                },
+                "restrictions": null,
+                "allow_force_pushes": false,
+                "allow_deletions": false
+              }'
+              
+              PROTECTION_RESULT=$(curl -s -X PUT \
+                -H "Authorization: token $TOKEN" \
+                -H "Accept: application/vnd.github.luke-cage-preview+json" \
+                -d "$PROTECTION_PAYLOAD" \
+                "https://api.github.com/repos/$ORGANIZATION/$REPO/branches/$BRANCH/protection")
+              
+              if echo "$PROTECTION_RESULT" | grep -q "Not Found\|Bad credentials\|Validation Failed"; then
+                echo -e "${RED}❌ PROTECTION FAILED for '$BRANCH': $(echo "$PROTECTION_RESULT" | grep -o "\"message\": \"[^\"]*\"")${NC}"
+                OTHER_ISSUES=$((OTHER_ISSUES+1))
+              else
+                echo -e "${GREEN}✅ PROTECTED: Applied protection rules to '$BRANCH'${NC}"
+                REPO_PROTECTED=$((REPO_PROTECTED+1))
+                PROTECTED=$((PROTECTED+1))
+              fi
+            done
+            
+            # Summarize for this repository
+            if [ $REPO_PROTECTED -gt 0 ]; then
+              echo -e "${GREEN}✅ Protected $REPO_PROTECTED branch(es) in $ORGANIZATION/$REPO${NC}"
+            fi
+            if [ $REPO_ALREADY_PROTECTED -gt 0 ]; then
+              echo -e "${YELLOW}⚠️ $REPO_ALREADY_PROTECTED branch(es) already protected in $ORGANIZATION/$REPO${NC}"
+            fi
+          done
+          
+          # Print overall summary
+          echo -e "\n${BLUE}ℹ️ SUMMARY${NC}"
+          echo -e "${BLUE}ℹ️ Total repositories processed: $TOTAL${NC}"
+          echo -e "${GREEN}✅ New branch protections applied: $PROTECTED${NC}"
+          echo -e "${YELLOW}⚠️ Branches already protected: $ALREADY_PROTECTED${NC}"
+          echo -e "${RED}❌ Repositories not found: $NOT_FOUND${NC}"
+          echo -e "${RED}❌ Protection issues: $OTHER_ISSUES${NC}"
