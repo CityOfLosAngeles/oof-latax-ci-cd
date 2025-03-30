@@ -33,7 +33,6 @@ jobs:
       
       - name: Create develop branches
         env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
           ORGANIZATION: ${{ github.event.inputs.organization }}
         run: |
@@ -81,9 +80,11 @@ jobs:
             TEMP_DIR=$(mktemp -d)
             cd $TEMP_DIR
             
-            # Clone the repository (shallow clone for speed)
+            # Clone the repository using the token directly in the URL
             echo -e "${BLUE}ℹ️ Cloning repository...${NC}"
-            if ! git clone "https://oauth2:${GH_TOKEN}@github.com/$ORGANIZATION/$REPO.git" . 2>/dev/null; then
+            git clone "https://${{ secrets.PAT_TOKEN }}@github.com/$ORGANIZATION/$REPO.git" .
+            
+            if [ $? -ne 0 ]; then
               echo -e "${RED}❌ CLONE FAILED: $ORGANIZATION/$REPO - This could be due to permissions or network issues${NC}"
               OTHER_ISSUES=$((OTHER_ISSUES+1))
               cd ..
@@ -114,7 +115,8 @@ jobs:
               git branch -M main
               
               # Try to push - handle if it fails
-              if ! git push -u origin main &>/dev/null; then
+              echo -e "${BLUE}ℹ️ Pushing initial commit to main branch...${NC}"
+              if ! git push -u origin main; then
                 echo -e "${RED}❌ PUSH FAILED: $ORGANIZATION/$REPO - Could not push to main branch${NC}"
                 echo -e "${RED}   This could be due to branch protection or permissions${NC}"
                 OTHER_ISSUES=$((OTHER_ISSUES+1))
@@ -125,7 +127,8 @@ jobs:
               
               git checkout -b develop
               
-              if ! git push -u origin develop &>/dev/null; then
+              echo -e "${BLUE}ℹ️ Pushing develop branch...${NC}"
+              if ! git push -u origin develop; then
                 echo -e "${RED}❌ PUSH FAILED: $ORGANIZATION/$REPO - Could not push develop branch${NC}"
                 OTHER_ISSUES=$((OTHER_ISSUES+1))
                 cd ..
