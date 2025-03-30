@@ -63,15 +63,27 @@ jobs:
             # Fetch repositories matching the prefix
             echo -e "${BLUE}ℹ️ Fetching repositories with prefix: $PREFIX${NC}"
             
-            # Get repositories from GitHub API
-            REPOS_JSON=$(curl -s -H "Authorization: token $TOKEN" \
+            # Get repositories from GitHub API with proper status code checking
+            RESPONSE_FILE=$(mktemp)
+            REPO_LIST_STATUS=$(curl -s -H "Authorization: token $TOKEN" \
+              -o "$RESPONSE_FILE" \
+              -w "%{http_code}" \
               "https://api.github.com/orgs/$ORGANIZATION/repos?per_page=100")
+            
+            if [ "$REPO_LIST_STATUS" != "200" ]; then
+              echo -e "${RED}❌ Failed to fetch repository list (HTTP Status: $REPO_LIST_STATUS)${NC}"
+              cat "$RESPONSE_FILE"
+              rm "$RESPONSE_FILE"
+              exit 1
+            fi
             
             # Extract repo names that match the prefix
             REPOS=()
-            for REPO_NAME in $(echo "$REPOS_JSON" | grep -o "\"name\": \"$PREFIX[^\"]*\"" | cut -d'"' -f4); do
+            for REPO_NAME in $(cat "$RESPONSE_FILE" | grep -o "\"name\": \"$PREFIX[^\"]*\"" | cut -d'"' -f4); do
               REPOS+=("$REPO_NAME")
             done
+            
+            rm "$RESPONSE_FILE"
             
             # Check if we found any matching repos
             if [ ${#REPOS[@]} -eq 0 ]; then
@@ -91,13 +103,13 @@ jobs:
             
             echo -e "\n${PURPLE}🔄 PROCESSING: $ORGANIZATION/$REPO${NC}"
             
-            # Step 1: Check if repository exists
+            # Step 1: Check if repository exists with proper status code handling
             echo -e "${BLUE}ℹ️ Checking if repository exists...${NC}"
-            REPO_INFO=$(curl -s -H "Authorization: token $TOKEN" \
+            REPO_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: token $TOKEN" \
               "https://api.github.com/repos/$ORGANIZATION/$REPO")
             
-            if echo "$REPO_INFO" | grep -q "Not Found"; then
-              echo -e "${RED}❌ NOT FOUND: $ORGANIZATION/$REPO${NC}"
+            if [ "$REPO_STATUS" != "200" ]; then
+              echo -e "${RED}❌ NOT FOUND: $ORGANIZATION/$REPO (HTTP Status: $REPO_STATUS)${NC}"
               NOT_FOUND=$((NOT_FOUND+1))
               continue
             fi
@@ -111,20 +123,33 @@ jobs:
             for BRANCH in "${BRANCHES[@]}"; do
               echo -e "${BLUE}ℹ️ Setting up protection for branch: $BRANCH${NC}"
               
-              # Check if branch protection already exists
-              PROTECTION_INFO=$(curl -s -H "Authorization: token $TOKEN" \
-                "https://api.github.com/repos/$ORGANIZATION/$REPO/branches/$BRANCH/protection")
+              # Check if branch exists and if protection already exists
+              BRANCH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: token $TOKEN" \
+                "https://api.github.com/repos/$ORGANIZATION/$REPO/branches/$BRANCH")
               
-              if echo "$PROTECTION_INFO" | grep -q "Branch not found"; then
-                echo -e "${YELLOW}⚠️ Branch '$BRANCH' does not exist yet, but will apply protection for future${NC}"
-              elif ! echo "$PROTECTION_INFO" | grep -q "Not Found"; then
-                echo -e "${YELLOW}⚠️ Branch '$BRANCH' already has some protection rules${NC}"
-                REPO_ALREADY_PROTECTED=$((REPO_ALREADY_PROTECTED+1))
-                ALREADY_PROTECTED=$((ALREADY_PROTECTED+1))
-                continue
+              if [ "$BRANCH_STATUS" != "200" ]; then
+                echo -e "${YELLOW}⚠️ Branch '$BRANCH' does not exist yet (HTTP Status: $BRANCH_STATUS), but will apply protection for future${NC}"
+                # Continue with protection for non-existent branches
+              else
+                # Branch exists, now check if protection exists
+                PROTECTION_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: token $TOKEN" \
+                  "https://api.github.com/repos/$ORGANIZATION/$REPO/branches/$BRANCH/protection")
+                
+                if [ "$PROTECTION_STATUS" = "200" ]; then
+                  echo -e "${YELLOW}⚠️ Branch '$BRANCH' already has some protection rules${NC}"
+                  REPO_ALREADY_PROTECTED=$((REPO_ALREADY_PROTECTED+1))
+                  ALREADY_PROTECTED=$((ALREADY_PROTECTED+1))
+                  continue
+                elif [ "$PROTECTION_STATUS" != "404" ]; then
+                  # If we get something other than 200 (exists) or 404 (not found), it's an error
+                  echo -e "${RED}❌ Error checking protection status for '$BRANCH' (HTTP Status: $PROTECTION_STATUS)${NC}"
+                  OTHER_ISSUES=$((OTHER_ISSUES+1))
+                  continue
+                fi
+                # Status 404 means no protection exists, so we'll proceed to apply it
               fi
               
-              # Apply branch protection rules
+              # Apply branch protection rules with better error handling
               PROTECTION_PAYLOAD='{
                 "required_status_checks": null,
                 "enforce_admins": true,
@@ -139,20 +164,38 @@ jobs:
                 "allow_deletions": false
               }'
               
-              PROTECTION_RESULT=$(curl -s -X PUT \
+              # Use a temporary file to store the response
+              RESPONSE_FILE=$(mktemp)
+              
+              PROTECTION_STATUS=$(curl -s -X PUT \
                 -H "Authorization: token $TOKEN" \
                 -H "Accept: application/vnd.github.luke-cage-preview+json" \
                 -d "$PROTECTION_PAYLOAD" \
+                -o "$RESPONSE_FILE" \
+                -w "%{http_code}" \
                 "https://api.github.com/repos/$ORGANIZATION/$REPO/branches/$BRANCH/protection")
               
-              if echo "$PROTECTION_RESULT" | grep -q "Not Found\|Bad credentials\|Validation Failed"; then
-                echo -e "${RED}❌ PROTECTION FAILED for '$BRANCH': $(echo "$PROTECTION_RESULT" | grep -o "\"message\": \"[^\"]*\"")${NC}"
-                OTHER_ISSUES=$((OTHER_ISSUES+1))
-              else
+              # Check the status code for success (200-299 range)
+              if [ "$PROTECTION_STATUS" -ge 200 ] && [ "$PROTECTION_STATUS" -lt 300 ]; then
                 echo -e "${GREEN}✅ PROTECTED: Applied protection rules to '$BRANCH'${NC}"
                 REPO_PROTECTED=$((REPO_PROTECTED+1))
                 PROTECTED=$((PROTECTED+1))
+              else
+                # Extract error message from response
+                ERROR_MESSAGE=$(cat "$RESPONSE_FILE" | grep -o '"message":"[^"]*"' | head -1 | cut -d'"' -f4)
+                if [ -z "$ERROR_MESSAGE" ]; then
+                  ERROR_MESSAGE="Unknown error"
+                fi
+                echo -e "${RED}❌ PROTECTION FAILED for '$BRANCH': HTTP Status $PROTECTION_STATUS, Message: $ERROR_MESSAGE${NC}"
+                OTHER_ISSUES=$((OTHER_ISSUES+1))
+                
+                # Print detailed response for debugging
+                echo -e "${RED}Detailed response:${NC}"
+                cat "$RESPONSE_FILE"
               fi
+              
+              # Clean up temporary file
+              rm "$RESPONSE_FILE"
             done
             
             # Summarize for this repository
