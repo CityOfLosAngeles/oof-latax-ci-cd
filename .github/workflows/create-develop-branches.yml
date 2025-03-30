@@ -30,6 +30,12 @@ jobs:
         run: |
           git config --global user.name "GitHub Actions Bot"
           git config --global user.email "actions@github.com"
+          # Configure git to store credentials
+          git config --global credential.helper store
+          # Store the credentials
+          echo "https://${{ secrets.PAT_TOKEN }}:x-oauth-basic@github.com" > ~/.git-credentials
+          # Make the credentials file secure
+          chmod 600 ~/.git-credentials
       
       - name: Create develop branches
         env:
@@ -70,7 +76,7 @@ jobs:
             
             # Check if repository exists
             echo -e "${BLUE}ℹ️ Checking if repository exists...${NC}"
-            if ! gh repo view "$ORGANIZATION/$REPO" 2>/dev/null; then
+            if ! gh repo view "$ORGANIZATION/$REPO"; then
               echo -e "${RED}❌ NOT FOUND: $ORGANIZATION/$REPO${NC}"
               NOT_FOUND=$((NOT_FOUND+1))
               continue
@@ -80,9 +86,9 @@ jobs:
             TEMP_DIR=$(mktemp -d)
             cd $TEMP_DIR
             
-            # Clone the repository using the token directly in the URL
+            # Clone the repository using standard URL (credentials handled by git config)
             echo -e "${BLUE}ℹ️ Cloning repository...${NC}"
-            git clone "https://${{ secrets.PAT_TOKEN }}@github.com/$ORGANIZATION/$REPO.git" .
+            git clone "https://github.com/$ORGANIZATION/$REPO.git" .
             
             if [ $? -ne 0 ]; then
               echo -e "${RED}❌ CLONE FAILED: $ORGANIZATION/$REPO - This could be due to permissions or network issues${NC}"
