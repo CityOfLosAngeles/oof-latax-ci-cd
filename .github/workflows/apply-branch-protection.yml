@@ -1,4 +1,4 @@
-name: Apply Branch Naming Rules
+name: Apply Branch Naming Rules v-0.0.4
 
 on:
   workflow_dispatch:
@@ -316,4 +316,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
           ORGANIZATION: ${{ github.event.inputs.organization }}
           REPOSITORIES: ${{ needs.setup.outputs.repos_json }}
-        run: node /tmp/apply-branch-naming-rules.js
+        run: |
+          cd /tmp  # Change to directory where we installed dependencies
+          node /tmp/apply-branch-naming-rules.js
