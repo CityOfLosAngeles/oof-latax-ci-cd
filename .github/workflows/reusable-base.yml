@@ -1,0 +1,267 @@
+name: Reusable Base Workflow for Repository Rules
+
+# This workflow is called by other workflows and handles common operations
+on:
+  workflow_call:
+    inputs:
+      repositories:
+        description: 'List of repositories (comma-separated, e.g., "repo1,repo2,repo3")'
+        required: false
+        type: string
+      prefix:
+        description: 'Repository prefix to filter by (e.g., "oof-latax-")'
+        required: false
+        type: string
+        default: 'oof-latax-'
+      organization:
+        description: 'GitHub organization name'
+        required: false
+        type: string
+        default: 'CityOfLosAngeles'
+    outputs:
+      repos_json:
+        description: 'JSON string containing discovered repositories'
+        value: ${{ jobs.discover_repos.outputs.repos_json }}
+      ccb_team_id:
+        description: 'ID of the oof-latax-ccb team'
+        value: ${{ jobs.discover_repos.outputs.ccb_team_id }}
+    secrets:
+      PAT_TOKEN:
+        description: 'Personal Access Token with repo and read:org permissions'
+        required: true
+
+jobs:
+  discover_repos:
+    runs-on: ubuntu-latest
+    outputs:
+      repos_json: ${{ steps.get_repos.outputs.repos_json }}
+      ccb_team_id: ${{ steps.get_team.outputs.ccb_team_id }}
+    
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Create temporary directory
+        run: mkdir -p /tmp/github-scripts
+      
+      - name: Create repository discovery script
+        run: |
+          cat > /tmp/github-scripts/discover-repos.js << 'EOF'
+          const { Octokit } = require('@octokit/rest');
+
+          // Initialize Octokit with GitHub token
+          const octokit = new Octokit({
+            auth: process.env.GITHUB_TOKEN,
+          });
+
+          // Define the organization and get repositories
+          const org = process.env.ORGANIZATION;
+          const repoPrefix = process.env.PREFIX || '';
+          const explicitRepos = process.env.REPOSITORIES ? process.env.REPOSITORIES.split(',').map(r => r.trim()) : [];
+
+          /**
+           * Get repositories from the organization
+           * @returns {Promise<string[]>} List of repository names
+           */
+          async function getRepositories() {
+            if (explicitRepos.length > 0) {
+              console.log(`Using explicitly provided repositories: ${explicitRepos.join(', ')}`);
+              return explicitRepos;
+            }
+
+            console.log(`Fetching repositories with prefix: ${repoPrefix}`);
+            
+            try {
+              const repos = [];
+              let page = 1;
+              let hasMoreRepos = true;
+              
+              while (hasMoreRepos) {
+                const response = await octokit.repos.listForOrg({
+                  org,
+                  per_page: 100,
+                  page
+                });
+                
+                const matchingRepos = response.data
+                  .filter(repo => repo.name.startsWith(repoPrefix))
+                  .map(repo => repo.name);
+                
+                repos.push(...matchingRepos);
+                
+                hasMoreRepos = response.data.length === 100;
+                page += 1;
+              }
+              
+              if (repos.length === 0) {
+                console.log(`No repositories found matching prefix: ${repoPrefix}`);
+                process.exit(1);
+              }
+              
+              console.log(`Found ${repos.length} repositories matching prefix: ${repoPrefix}`);
+              return repos;
+            } catch (error) {
+              console.error(`Failed to fetch repositories: ${error.message}`);
+              if (error.response) {
+                console.error(JSON.stringify(error.response.data, null, 2));
+              }
+              process.exit(1);
+            }
+          }
+
+          /**
+           * Validate if repositories exist
+           * @param {string[]} repos List of repository names
+           * @returns {Promise<string[]>} List of valid repository names
+           */
+          async function validateRepositories(repos) {
+            const validRepos = [];
+            const invalidRepos = [];
+            
+            for (const repo of repos) {
+              try {
+                await octokit.repos.get({
+                  owner: org,
+                  repo
+                });
+                validRepos.push(repo);
+              } catch (error) {
+                if (error.status === 404) {
+                  invalidRepos.push(repo);
+                } else {
+                  console.error(`Error checking repository ${repo}: ${error.message}`);
+                  throw error;
+                }
+              }
+            }
+            
+            if (invalidRepos.length > 0) {
+              console.log(`WARNING: The following repositories were not found: ${invalidRepos.join(', ')}`);
+            }
+            
+            if (validRepos.length === 0) {
+              console.error('No valid repositories found');
+              process.exit(1);
+            }
+            
+            console.log(`Validated ${validRepos.length} repositories`);
+            return validRepos;
+          }
+
+          /**
+           * Main function
+           */
+          async function main() {
+            try {
+              // Get repositories
+              const repositories = await getRepositories();
+              
+              // Validate repositories
+              const validRepos = await validateRepositories(repositories);
+              
+              // Output repositories as JSON
+              console.log(`::set-output name=repos_json::${JSON.stringify(validRepos)}`);
+            } catch (error) {
+              console.error(`Error in main function: ${error.message}`);
+              process.exit(1);
+            }
+          }
+
+          // Run the main function
+          main();
+          EOF
+      
+      - name: Create team discovery script
+        run: |
+          cat > /tmp/github-scripts/get-team-id.js << 'EOF'
+          const { Octokit } = require('@octokit/rest');
+
+          // Initialize Octokit with GitHub token
+          const octokit = new Octokit({
+            auth: process.env.GITHUB_TOKEN,
+          });
+
+          // Define the organization
+          const org = process.env.ORGANIZATION;
+          const teamSlug = 'oof-latax-ccb';
+
+          /**
+           * Get team ID by slug
+           * @returns {Promise<number>} Team ID
+           */
+          async function getTeamId() {
+            try {
+              const response = await octokit.teams.getByName({
+                org,
+                team_slug: teamSlug
+              });
+              
+              const teamId = response.data.id;
+              console.log(`Found team ID for ${teamSlug}: ${teamId}`);
+              return teamId;
+            } catch (error) {
+              if (error.status === 404) {
+                console.log(`WARNING: Team ${teamSlug} was not found`);
+                return 0;
+              } else {
+                console.error(`Error getting team: ${error.message}`);
+                if (error.response) {
+                  console.error(JSON.stringify(error.response.data, null, 2));
+                }
+                return 0;
+              }
+            }
+          }
+
+          /**
+           * Main function
+           */
+          async function main() {
+            try {
+              // Get team ID
+              const teamId = await getTeamId();
+              
+              // Output team ID
+              console.log(`::set-output name=ccb_team_id::${teamId}`);
+            } catch (error) {
+              console.error(`Error in main function: ${error.message}`);
+              process.exit(1);
+            }
+          }
+
+          // Run the main function
+          main();
+          EOF
+      
+      - name: Install dependencies
+        run: npm install @octokit/rest
+      
+      - name: Get repositories
+        id: get_repos
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+          ORGANIZATION: ${{ inputs.organization }}
+          PREFIX: ${{ inputs.prefix }}
+          REPOSITORIES: ${{ inputs.repositories }}
+        run: node /tmp/github-scripts/discover-repos.js
+      
+      - name: Get team ID
+        id: get_team
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+          ORGANIZATION: ${{ inputs.organization }}
+        run: node /tmp/github-scripts/get-team-id.js
+      
+      - name: Display discovered information
+        run: |
+          echo "Discovered repositories:"
+          echo '${{ steps.get_repos.outputs.repos_json }}' | jq -r '.[]' | sed 's/^/- /'
+          echo "CCB Team ID: ${{ steps.get_team.outputs.ccb_team_id }}"
+          
+          # Verify outputs
+          if [ -z "${{ steps.get_repos.outputs.repos_json }}" ]; then
+            echo "ERROR: No repositories were discovered"
+            exit 1
+          fi

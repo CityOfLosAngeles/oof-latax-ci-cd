@@ -1,0 +1,310 @@
+name: Apply Branch Naming Rules
+
+on:
+  workflow_dispatch:
+    inputs:
+      repositories:
+        description: 'List of repositories (comma-separated, e.g., "repo1,repo2,repo3")'
+        required: false
+        type: string
+      prefix:
+        description: 'Repository prefix to filter by (e.g., "oof-latax-")'
+        required: false
+        default: 'oof-latax-'
+        type: string
+      organization:
+        description: 'GitHub organization name'
+        required: true
+        default: 'CityOfLosAngeles'
+        type: string
+
+jobs:
+  # Call the reusable base workflow to get repository and team information
+  setup:
+    uses: ./.github/workflows/reusable-base.yml
+    with:
+      repositories: ${{ github.event.inputs.repositories }}
+      prefix: ${{ github.event.inputs.prefix }}
+      organization: ${{ github.event.inputs.organization }}
+    secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+  
+  # Apply branch naming rules to repositories
+  apply_branch_naming_rules:
+    needs: setup
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Create branch naming rules script
+        run: |
+          cat > /tmp/apply-branch-naming-rules.js << 'EOF'
+          const { Octokit } = require('@octokit/rest');
+
+          // Initialize Octokit with GitHub token
+          const octokit = new Octokit({
+            auth: process.env.GITHUB_TOKEN,
+          });
+
+          // Get repositories and organization from environment
+          const org = process.env.ORGANIZATION;
+          const repos = JSON.parse(process.env.REPOSITORIES);
+
+          // Color codes for console output
+          const colors = {
+            red: '\x1b[31m',
+            green: '\x1b[32m',
+            yellow: '\x1b[33m',
+            blue: '\x1b[34m',
+            magenta: '\x1b[35m',
+            reset: '\x1b[0m'
+          };
+
+          // Counters for summary reporting
+          const counters = {
+            totalRepos: repos.length,
+            rulesApplied: 0,
+            rulesFailed: 0
+          };
+
+          /**
+           * Create a rule set for branch naming standards
+           * @param {string} repo Repository name
+           * @returns {Promise<boolean>} Success status
+           */
+          async function createBranchNamingRule(repo) {
+            const ruleName = "Branch naming standards";
+            console.log(`${colors.blue}Creating '${ruleName}' rule set for ${org}/${repo}${colors.reset}`);
+            
+            const ruleSet = {
+              name: ruleName,
+              target: "branch",
+              enforcement: "active",
+              conditions: {
+                ref_name: {
+                  include: ["refs/heads/*"],
+                  exclude: []
+                }
+              },
+              rules: [
+                {
+                  type: "creation",
+                  parameters: {
+                    prevent_branch_creation: true,
+                    ref_name_pattern: {
+                      name: "Branch naming standard",
+                      negate: true,
+                      pattern: "^((feature|bugfix|release|hotfix)/INC\\d+:.{1,180})$",
+                      operator: "regex"
+                    }
+                  }
+                }
+              ],
+              bypass_actors: []
+            };
+            
+            try {
+              // Check if rule already exists
+              const existingRules = await octokit.request('GET /repos/{owner}/{repo}/rulesets', {
+                owner: org,
+                repo: repo
+              });
+              
+              const existingRule = existingRules.data.find(rule => rule.name === ruleName);
+              
+              if (existingRule) {
+                console.log(`${colors.yellow}Rule '${ruleName}' already exists (ID: ${existingRule.id}). Updating...${colors.reset}`);
+                
+                const response = await octokit.request('PUT /repos/{owner}/{repo}/rulesets/{ruleset_id}', {
+                  owner: org,
+                  repo: repo,
+                  ruleset_id: existingRule.id,
+                  ...ruleSet
+                });
+                
+                if (response.status >= 200 && response.status < 300) {
+                  console.log(`${colors.green}✅ Updated rule '${ruleName}' successfully${colors.reset}`);
+                  return true;
+                } else {
+                  console.error(`${colors.red}❌ Failed to update rule '${ruleName}'${colors.reset}`);
+                  return false;
+                }
+              } else {
+                const response = await octokit.request('POST /repos/{owner}/{repo}/rulesets', {
+                  owner: org,
+                  repo: repo,
+                  ...ruleSet
+                });
+                
+                if (response.status >= 200 && response.status < 300) {
+                  console.log(`${colors.green}✅ Created rule '${ruleName}' successfully${colors.reset}`);
+                  return true;
+                } else {
+                  console.error(`${colors.red}❌ Failed to create rule '${ruleName}'${colors.reset}`);
+                  return false;
+                }
+              }
+            } catch (error) {
+              console.error(`${colors.red}❌ Error creating/updating rule '${ruleName}': ${error.message}${colors.reset}`);
+              if (error.response && error.response.data) {
+                console.error(`${colors.red}Details: ${JSON.stringify(error.response.data, null, 2)}${colors.reset}`);
+              }
+              return false;
+            }
+          }
+
+          /**
+           * Create a rule set to prevent creation of reserved branch names
+           * @param {string} repo Repository name
+           * @returns {Promise<boolean>} Success status
+           */
+          async function createReservedBranchNamesRule(repo) {
+            const ruleName = "Prevent creation of protected branch names";
+            console.log(`${colors.blue}Creating '${ruleName}' rule set for ${org}/${repo}${colors.reset}`);
+            
+            const ruleSet = {
+              name: ruleName,
+              target: "branch",
+              enforcement: "active",
+              conditions: {
+                ref_name: {
+                  include: ["refs/heads/master", "refs/heads/main", "refs/heads/develop"],
+                  exclude: []
+                }
+              },
+              rules: [
+                {
+                  type: "creation",
+                  parameters: {
+                    prevent_branch_creation: true,
+                    ref_name_pattern: {
+                      name: "Prevent reserved branch names",
+                      negate: false,
+                      pattern: "^(master|main|develop)$",
+                      operator: "regex"
+                    }
+                  }
+                }
+              ],
+              bypass_actors: []
+            };
+            
+            try {
+              // Check if rule already exists
+              const existingRules = await octokit.request('GET /repos/{owner}/{repo}/rulesets', {
+                owner: org,
+                repo: repo
+              });
+              
+              const existingRule = existingRules.data.find(rule => rule.name === ruleName);
+              
+              if (existingRule) {
+                console.log(`${colors.yellow}Rule '${ruleName}' already exists (ID: ${existingRule.id}). Updating...${colors.reset}`);
+                
+                const response = await octokit.request('PUT /repos/{owner}/{repo}/rulesets/{ruleset_id}', {
+                  owner: org,
+                  repo: repo,
+                  ruleset_id: existingRule.id,
+                  ...ruleSet
+                });
+                
+                if (response.status >= 200 && response.status < 300) {
+                  console.log(`${colors.green}✅ Updated rule '${ruleName}' successfully${colors.reset}`);
+                  return true;
+                } else {
+                  console.error(`${colors.red}❌ Failed to update rule '${ruleName}'${colors.reset}`);
+                  return false;
+                }
+              } else {
+                const response = await octokit.request('POST /repos/{owner}/{repo}/rulesets', {
+                  owner: org,
+                  repo: repo,
+                  ...ruleSet
+                });
+                
+                if (response.status >= 200 && response.status < 300) {
+                  console.log(`${colors.green}✅ Created rule '${ruleName}' successfully${colors.reset}`);
+                  return true;
+                } else {
+                  console.error(`${colors.red}❌ Failed to create rule '${ruleName}'${colors.reset}`);
+                  return false;
+                }
+              }
+            } catch (error) {
+              console.error(`${colors.red}❌ Error creating/updating rule '${ruleName}': ${error.message}${colors.reset}`);
+              if (error.response && error.response.data) {
+                console.error(`${colors.red}Details: ${JSON.stringify(error.response.data, null, 2)}${colors.reset}`);
+              }
+              return false;
+            }
+          }
+
+          /**
+           * Process a single repository
+           * @param {string} repo Repository name
+           */
+          async function processRepository(repo) {
+            console.log(`\n${colors.magenta}🔄 PROCESSING: ${org}/${repo}${colors.reset}`);
+            
+            let success = 0;
+            
+            // Apply branch naming standards rule
+            if (await createBranchNamingRule(repo)) {
+              success++;
+            }
+            
+            // Apply reserved branch names rule
+            if (await createReservedBranchNamesRule(repo)) {
+              success++;
+            }
+            
+            // Count this repository as successfully processed if at least one rule was applied
+            if (success > 0) {
+              counters.rulesApplied++;
+              console.log(`${colors.green}✅ Successfully applied ${success}/2 rules to ${org}/${repo}${colors.reset}`);
+            } else {
+              counters.rulesFailed++;
+              console.log(`${colors.red}❌ Failed to apply any rules to ${org}/${repo}${colors.reset}`);
+            }
+          }
+
+          /**
+           * Main function
+           */
+          async function main() {
+            try {
+              console.log(`${colors.blue}Starting branch naming rules application for ${repos.length} repositories${colors.reset}`);
+              
+              // Process each repository
+              for (const repo of repos) {
+                await processRepository(repo);
+              }
+              
+              // Print summary
+              console.log(`\n${colors.blue}ℹ️ SUMMARY${colors.reset}`);
+              console.log(`${colors.blue}ℹ️ Total repositories processed: ${counters.totalRepos}${colors.reset}`);
+              console.log(`${colors.green}✅ Repositories with rules applied successfully: ${counters.rulesApplied}${colors.reset}`);
+              console.log(`${colors.red}❌ Repositories with failed rule application: ${counters.rulesFailed}${colors.reset}`);
+            } catch (error) {
+              console.error(`${colors.red}❌ Error in main function: ${error.message}${colors.reset}`);
+              process.exit(1);
+            }
+          }
+
+          // Run the main function
+          main();
+          EOF
+      
+      - name: Install dependencies
+        run: npm install @octokit/rest
+      
+      - name: Apply branch naming rules
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+          ORGANIZATION: ${{ github.event.inputs.organization }}
+          REPOSITORIES: ${{ needs.setup.outputs.repos_json }}
+        run: node /tmp/apply-branch-naming-rules.js
