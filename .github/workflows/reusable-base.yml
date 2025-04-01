@@ -44,7 +44,11 @@ jobs:
           node-version: '20'
       
       - name: Create temporary directory
-        run: mkdir -p /tmp/github-scripts
+        run: |
+          mkdir -p /tmp/github-scripts
+          cd /tmp/github-scripts
+          npm init -y
+          npm install @octokit/rest
       
       - name: Create repository discovery script
         run: |
@@ -236,7 +240,9 @@ jobs:
           EOF
       
       - name: Install dependencies
-        run: npm install @octokit/rest
+        run: |
+          # Dependencies already installed in the temporary directory
+          echo "Using dependencies installed in /tmp/github-scripts"
       
       - name: Get repositories
         id: get_repos

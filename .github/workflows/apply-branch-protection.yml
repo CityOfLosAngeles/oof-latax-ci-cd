@@ -1,4 +1,4 @@
-name: Apply Branch Protection Rules
+name: Apply Branch Naming Rules
 
 on:
   workflow_dispatch:
@@ -15,202 +15,305 @@ on:
       organization:
         description: 'GitHub organization name'
         required: true
-        default: 'vishnu-parandhaman'
+        default: 'CityOfLosAngeles'
         type: string
 
 jobs:
-  apply-branch-protection:
+  # Call the reusable base workflow to get repository and team information
+  setup:
+    uses: ./.github/workflows/reusable-base.yml
+    with:
+      repositories: ${{ github.event.inputs.repositories }}
+      prefix: ${{ github.event.inputs.prefix }}
+      organization: ${{ github.event.inputs.organization }}
+    secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+  
+  # Apply branch naming rules to repositories
+  apply_branch_naming_rules:
+    needs: setup
     runs-on: ubuntu-latest
+    
     steps:
-      - name: Check out repository code
-        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
       
-      - name: Configure git
+      - name: Create temporary directory and install dependencies
         run: |
-          git config --global user.name "GitHub Actions Bot"
-          git config --global user.email "actions@github.com"
+          mkdir -p /tmp
+          cd /tmp
+          npm init -y
+          npm install @octokit/rest
       
-      - name: Apply branch protection rules
+      - name: Create branch naming rules script
+        run: |
+          cat > /tmp/apply-branch-naming-rules.js << 'EOF'
+          const { Octokit } = require('@octokit/rest');
+
+          // Initialize Octokit with GitHub token
+          const octokit = new Octokit({
+            auth: process.env.GITHUB_TOKEN,
+          });
+
+          // Get repositories and organization from environment
+          const org = process.env.ORGANIZATION;
+          const repos = JSON.parse(process.env.REPOSITORIES);
+
+          // Color codes for console output
+          const colors = {
+            red: '\x1b[31m',
+            green: '\x1b[32m',
+            yellow: '\x1b[33m',
+            blue: '\x1b[34m',
+            magenta: '\x1b[35m',
+            reset: '\x1b[0m'
+          };
+
+          // Counters for summary reporting
+          const counters = {
+            totalRepos: repos.length,
+            rulesApplied: 0,
+            rulesFailed: 0
+          };
+
+          /**
+           * Create a rule set for branch naming standards
+           * @param {string} repo Repository name
+           * @returns {Promise<boolean>} Success status
+           */
+          async function createBranchNamingRule(repo) {
+            const ruleName = "Branch naming standards";
+            console.log(`${colors.blue}Creating '${ruleName}' rule set for ${org}/${repo}${colors.reset}`);
+            
+            const ruleSet = {
+              name: ruleName,
+              target: "branch",
+              enforcement: "active",
+              conditions: {
+                ref_name: {
+                  include: ["refs/heads/*"],
+                  exclude: []
+                }
+              },
+              rules: [
+                {
+                  type: "creation",
+                  parameters: {
+                    prevent_branch_creation: true,
+                    ref_name_pattern: {
+                      name: "Branch naming standard",
+                      negate: true,
+                      pattern: "^((feature|bugfix|release|hotfix)/INC\\d+:.{1,180})$",
+                      operator: "regex"
+                    }
+                  }
+                }
+              ],
+              bypass_actors: []
+            };
+            
+            try {
+              // Check if rule already exists
+              const existingRules = await octokit.request('GET /repos/{owner}/{repo}/rulesets', {
+                owner: org,
+                repo: repo
+              });
+              
+              const existingRule = existingRules.data.find(rule => rule.name === ruleName);
+              
+              if (existingRule) {
+                console.log(`${colors.yellow}Rule '${ruleName}' already exists (ID: ${existingRule.id}). Updating...${colors.reset}`);
+                
+                const response = await octokit.request('PUT /repos/{owner}/{repo}/rulesets/{ruleset_id}', {
+                  owner: org,
+                  repo: repo,
+                  ruleset_id: existingRule.id,
+                  ...ruleSet
+                });
+                
+                if (response.status >= 200 && response.status < 300) {
+                  console.log(`${colors.green}✅ Updated rule '${ruleName}' successfully${colors.reset}`);
+                  return true;
+                } else {
+                  console.error(`${colors.red}❌ Failed to update rule '${ruleName}'${colors.reset}`);
+                  return false;
+                }
+              } else {
+                const response = await octokit.request('POST /repos/{owner}/{repo}/rulesets', {
+                  owner: org,
+                  repo: repo,
+                  ...ruleSet
+                });
+                
+                if (response.status >= 200 && response.status < 300) {
+                  console.log(`${colors.green}✅ Created rule '${ruleName}' successfully${colors.reset}`);
+                  return true;
+                } else {
+                  console.error(`${colors.red}❌ Failed to create rule '${ruleName}'${colors.reset}`);
+                  return false;
+                }
+              }
+            } catch (error) {
+              console.error(`${colors.red}❌ Error creating/updating rule '${ruleName}': ${error.message}${colors.reset}`);
+              if (error.response && error.response.data) {
+                console.error(`${colors.red}Details: ${JSON.stringify(error.response.data, null, 2)}${colors.reset}`);
+              }
+              return false;
+            }
+          }
+
+          /**
+           * Create a rule set to prevent creation of reserved branch names
+           * @param {string} repo Repository name
+           * @returns {Promise<boolean>} Success status
+           */
+          async function createReservedBranchNamesRule(repo) {
+            const ruleName = "Prevent creation of protected branch names";
+            console.log(`${colors.blue}Creating '${ruleName}' rule set for ${org}/${repo}${colors.reset}`);
+            
+            const ruleSet = {
+              name: ruleName,
+              target: "branch",
+              enforcement: "active",
+              conditions: {
+                ref_name: {
+                  include: ["refs/heads/master", "refs/heads/main", "refs/heads/develop"],
+                  exclude: []
+                }
+              },
+              rules: [
+                {
+                  type: "creation",
+                  parameters: {
+                    prevent_branch_creation: true,
+                    ref_name_pattern: {
+                      name: "Prevent reserved branch names",
+                      negate: false,
+                      pattern: "^(master|main|develop)$",
+                      operator: "regex"
+                    }
+                  }
+                }
+              ],
+              bypass_actors: []
+            };
+            
+            try {
+              // Check if rule already exists
+              const existingRules = await octokit.request('GET /repos/{owner}/{repo}/rulesets', {
+                owner: org,
+                repo: repo
+              });
+              
+              const existingRule = existingRules.data.find(rule => rule.name === ruleName);
+              
+              if (existingRule) {
+                console.log(`${colors.yellow}Rule '${ruleName}' already exists (ID: ${existingRule.id}). Updating...${colors.reset}`);
+                
+                const response = await octokit.request('PUT /repos/{owner}/{repo}/rulesets/{ruleset_id}', {
+                  owner: org,
+                  repo: repo,
+                  ruleset_id: existingRule.id,
+                  ...ruleSet
+                });
+                
+                if (response.status >= 200 && response.status < 300) {
+                  console.log(`${colors.green}✅ Updated rule '${ruleName}' successfully${colors.reset}`);
+                  return true;
+                } else {
+                  console.error(`${colors.red}❌ Failed to update rule '${ruleName}'${colors.reset}`);
+                  return false;
+                }
+              } else {
+                const response = await octokit.request('POST /repos/{owner}/{repo}/rulesets', {
+                  owner: org,
+                  repo: repo,
+                  ...ruleSet
+                });
+                
+                if (response.status >= 200 && response.status < 300) {
+                  console.log(`${colors.green}✅ Created rule '${ruleName}' successfully${colors.reset}`);
+                  return true;
+                } else {
+                  console.error(`${colors.red}❌ Failed to create rule '${ruleName}'${colors.reset}`);
+                  return false;
+                }
+              }
+            } catch (error) {
+              console.error(`${colors.red}❌ Error creating/updating rule '${ruleName}': ${error.message}${colors.reset}`);
+              if (error.response && error.response.data) {
+                console.error(`${colors.red}Details: ${JSON.stringify(error.response.data, null, 2)}${colors.reset}`);
+              }
+              return false;
+            }
+          }
+
+          /**
+           * Process a single repository
+           * @param {string} repo Repository name
+           */
+          async function processRepository(repo) {
+            console.log(`\n${colors.magenta}🔄 PROCESSING: ${org}/${repo}${colors.reset}`);
+            
+            let success = 0;
+            
+            // Apply branch naming standards rule
+            if (await createBranchNamingRule(repo)) {
+              success++;
+            }
+            
+            // Apply reserved branch names rule
+            if (await createReservedBranchNamesRule(repo)) {
+              success++;
+            }
+            
+            // Count this repository as successfully processed if at least one rule was applied
+            if (success > 0) {
+              counters.rulesApplied++;
+              console.log(`${colors.green}✅ Successfully applied ${success}/2 rules to ${org}/${repo}${colors.reset}`);
+            } else {
+              counters.rulesFailed++;
+              console.log(`${colors.red}❌ Failed to apply any rules to ${org}/${repo}${colors.reset}`);
+            }
+          }
+
+          /**
+           * Main function
+           */
+          async function main() {
+            try {
+              console.log(`${colors.blue}Starting branch naming rules application for ${repos.length} repositories${colors.reset}`);
+              
+              // Process each repository
+              for (const repo of repos) {
+                await processRepository(repo);
+              }
+              
+              // Print summary
+              console.log(`\n${colors.blue}ℹ️ SUMMARY${colors.reset}`);
+              console.log(`${colors.blue}ℹ️ Total repositories processed: ${counters.totalRepos}${colors.reset}`);
+              console.log(`${colors.green}✅ Repositories with rules applied successfully: ${counters.rulesApplied}${colors.reset}`);
+              console.log(`${colors.red}❌ Repositories with failed rule application: ${counters.rulesFailed}${colors.reset}`);
+            } catch (error) {
+              console.error(`${colors.red}❌ Error in main function: ${error.message}${colors.reset}`);
+              process.exit(1);
+            }
+          }
+
+          // Run the main function
+          main();
+          EOF
+      
+      - name: Install dependencies
+        run: |
+          # Dependencies already installed in the temporary directory
+          echo "Using dependencies installed in /tmp"
+      
+      - name: Apply branch naming rules
         env:
-          TOKEN: ${{ secrets.PAT_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
           ORGANIZATION: ${{ github.event.inputs.organization }}
-          PREFIX: ${{ github.event.inputs.prefix }}
-        run: |
-          # Define color codes for logging
-          RED='\033[0;31m'
-          GREEN='\033[0;32m'
-          YELLOW='\033[0;33m'
-          BLUE='\033[0;34m'
-          PURPLE='\033[0;35m'
-          NC='\033[0m' # No Color
-          
-          # Initialize counters for summary
-          TOTAL=0
-          PROTECTED=0
-          ALREADY_PROTECTED=0
-          NOT_FOUND=0
-          OTHER_ISSUES=0
-          
-          # Branches to protect
-          BRANCHES=("main" "develop" "master")
-          
-          # Get list of repositories
-          if [ -n "${{ github.event.inputs.repositories }}" ]; then
-            # Use the provided repository list
-            IFS=',' read -ra REPOS <<< "${{ github.event.inputs.repositories }}"
-            echo -e "${BLUE}ℹ️ Using explicitly provided repository list${NC}"
-          else
-            # Fetch repositories matching the prefix
-            echo -e "${BLUE}ℹ️ Fetching repositories with prefix: $PREFIX${NC}"
-            
-            # Get repositories from GitHub API with proper status code checking
-            RESPONSE_FILE=$(mktemp)
-            REPO_LIST_STATUS=$(curl -s -H "Authorization: token $TOKEN" \
-              -o "$RESPONSE_FILE" \
-              -w "%{http_code}" \
-              "https://api.github.com/orgs/$ORGANIZATION/repos?per_page=100")
-            
-            if [ "$REPO_LIST_STATUS" != "200" ]; then
-              echo -e "${RED}❌ Failed to fetch repository list (HTTP Status: $REPO_LIST_STATUS)${NC}"
-              cat "$RESPONSE_FILE"
-              rm "$RESPONSE_FILE"
-              exit 1
-            fi
-            
-            # Extract repo names that match the prefix
-            REPOS=()
-            for REPO_NAME in $(cat "$RESPONSE_FILE" | grep -o "\"name\": \"$PREFIX[^\"]*\"" | cut -d'"' -f4); do
-              REPOS+=("$REPO_NAME")
-            done
-            
-            rm "$RESPONSE_FILE"
-            
-            # Check if we found any matching repos
-            if [ ${#REPOS[@]} -eq 0 ]; then
-              echo -e "${RED}❌ No repositories found matching prefix: $PREFIX${NC}"
-              exit 1
-            fi
-            
-            echo -e "${BLUE}ℹ️ Found ${#REPOS[@]} repositories matching prefix: $PREFIX${NC}"
-          fi
-          
-          echo -e "${BLUE}ℹ️ Starting protection of branches across ${#REPOS[@]} repositories${NC}"
-          
-          # Loop through each repository
-          for REPO in "${REPOS[@]}"; do
-            REPO=$(echo $REPO | xargs) # Trim whitespace
-            TOTAL=$((TOTAL+1))
-            
-            echo -e "\n${PURPLE}🔄 PROCESSING: $ORGANIZATION/$REPO${NC}"
-            
-            # Step 1: Check if repository exists with proper status code handling
-            echo -e "${BLUE}ℹ️ Checking if repository exists...${NC}"
-            REPO_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: token $TOKEN" \
-              "https://api.github.com/repos/$ORGANIZATION/$REPO")
-            
-            if [ "$REPO_STATUS" != "200" ]; then
-              echo -e "${RED}❌ NOT FOUND: $ORGANIZATION/$REPO (HTTP Status: $REPO_STATUS)${NC}"
-              NOT_FOUND=$((NOT_FOUND+1))
-              continue
-            fi
-            
-            echo -e "${BLUE}ℹ️ Repository found: $ORGANIZATION/$REPO${NC}"
-            
-            # Step 2: Apply protection rules to each branch
-            REPO_PROTECTED=0
-            REPO_ALREADY_PROTECTED=0
-            
-            for BRANCH in "${BRANCHES[@]}"; do
-              echo -e "${BLUE}ℹ️ Setting up protection for branch: $BRANCH${NC}"
-              
-              # Check if branch exists and if protection already exists
-              BRANCH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: token $TOKEN" \
-                "https://api.github.com/repos/$ORGANIZATION/$REPO/branches/$BRANCH")
-              
-              if [ "$BRANCH_STATUS" != "200" ]; then
-                echo -e "${YELLOW}⚠️ Branch '$BRANCH' does not exist yet (HTTP Status: $BRANCH_STATUS), but will apply protection for future${NC}"
-                # Continue with protection for non-existent branches
-              else
-                # Branch exists, now check if protection exists
-                PROTECTION_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: token $TOKEN" \
-                  "https://api.github.com/repos/$ORGANIZATION/$REPO/branches/$BRANCH/protection")
-                
-                if [ "$PROTECTION_STATUS" = "200" ]; then
-                  echo -e "${YELLOW}⚠️ Branch '$BRANCH' already has some protection rules${NC}"
-                  REPO_ALREADY_PROTECTED=$((REPO_ALREADY_PROTECTED+1))
-                  ALREADY_PROTECTED=$((ALREADY_PROTECTED+1))
-                  continue
-                elif [ "$PROTECTION_STATUS" != "404" ]; then
-                  # If we get something other than 200 (exists) or 404 (not found), it's an error
-                  echo -e "${RED}❌ Error checking protection status for '$BRANCH' (HTTP Status: $PROTECTION_STATUS)${NC}"
-                  OTHER_ISSUES=$((OTHER_ISSUES+1))
-                  continue
-                fi
-                # Status 404 means no protection exists, so we'll proceed to apply it
-              fi
-              
-              # Apply branch protection rules with better error handling
-              PROTECTION_PAYLOAD='{
-                "required_status_checks": null,
-                "enforce_admins": true,
-                "required_pull_request_reviews": {
-                  "dismissal_restrictions": {},
-                  "dismiss_stale_reviews": true,
-                  "require_code_owner_reviews": false,
-                  "required_approving_review_count": 1
-                },
-                "restrictions": null,
-                "allow_force_pushes": false,
-                "allow_deletions": false
-              }'
-              
-              # Use a temporary file to store the response
-              RESPONSE_FILE=$(mktemp)
-              
-              PROTECTION_STATUS=$(curl -s -X PUT \
-                -H "Authorization: token $TOKEN" \
-                -H "Accept: application/vnd.github.luke-cage-preview+json" \
-                -d "$PROTECTION_PAYLOAD" \
-                -o "$RESPONSE_FILE" \
-                -w "%{http_code}" \
-                "https://api.github.com/repos/$ORGANIZATION/$REPO/branches/$BRANCH/protection")
-              
-              # Check the status code for success (200-299 range)
-              if [ "$PROTECTION_STATUS" -ge 200 ] && [ "$PROTECTION_STATUS" -lt 300 ]; then
-                echo -e "${GREEN}✅ PROTECTED: Applied protection rules to '$BRANCH'${NC}"
-                REPO_PROTECTED=$((REPO_PROTECTED+1))
-                PROTECTED=$((PROTECTED+1))
-              else
-                # Extract error message from response
-                ERROR_MESSAGE=$(cat "$RESPONSE_FILE" | grep -o '"message":"[^"]*"' | head -1 | cut -d'"' -f4)
-                if [ -z "$ERROR_MESSAGE" ]; then
-                  ERROR_MESSAGE="Unknown error"
-                fi
-                echo -e "${RED}❌ PROTECTION FAILED for '$BRANCH': HTTP Status $PROTECTION_STATUS, Message: $ERROR_MESSAGE${NC}"
-                OTHER_ISSUES=$((OTHER_ISSUES+1))
-                
-                # Print detailed response for debugging
-                echo -e "${RED}Detailed response:${NC}"
-                cat "$RESPONSE_FILE"
-              fi
-              
-              # Clean up temporary file
-              rm "$RESPONSE_FILE"
-            done
-            
-            # Summarize for this repository
-            if [ $REPO_PROTECTED -gt 0 ]; then
-              echo -e "${GREEN}✅ Protected $REPO_PROTECTED branch(es) in $ORGANIZATION/$REPO${NC}"
-            fi
-            if [ $REPO_ALREADY_PROTECTED -gt 0 ]; then
-              echo -e "${YELLOW}⚠️ $REPO_ALREADY_PROTECTED branch(es) already protected in $ORGANIZATION/$REPO${NC}"
-            fi
-          done
-          
-          # Print overall summary
-          echo -e "\n${BLUE}ℹ️ SUMMARY${NC}"
-          echo -e "${BLUE}ℹ️ Total repositories processed: $TOTAL${NC}"
-          echo -e "${GREEN}✅ New branch protections applied: $PROTECTED${NC}"
-          echo -e "${YELLOW}⚠️ Branches already protected: $ALREADY_PROTECTED${NC}"
-          echo -e "${RED}❌ Repositories not found: $NOT_FOUND${NC}"
-          echo -e "${RED}❌ Protection issues: $OTHER_ISSUES${NC}"
+          REPOSITORIES: ${{ needs.setup.outputs.repos_json }}
+        run: node /tmp/apply-branch-naming-rules.js
