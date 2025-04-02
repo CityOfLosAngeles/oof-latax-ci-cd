@@ -1,4 +1,4 @@
-name: Apply Branch Naming Rules
+name: deprecated Apply Branch Naming Rules
 
 on:
   workflow_dispatch:

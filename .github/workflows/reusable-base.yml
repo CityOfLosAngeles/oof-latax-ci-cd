@@ -43,7 +43,7 @@ jobs:
         with:
           node-version: '20'
       
-      - name: Create temporary directory
+      - name: Create temporary directory and install dependencies
         run: |
           mkdir -p /tmp/github-scripts
           cd /tmp/github-scripts
@@ -54,6 +54,7 @@ jobs:
         run: |
           cat > /tmp/github-scripts/discover-repos.js << 'EOF'
           const { Octokit } = require('@octokit/rest');
+          const fs = require('fs');
 
           // Initialize Octokit with GitHub token
           const octokit = new Octokit({
@@ -165,8 +166,8 @@ jobs:
               // Validate repositories
               const validRepos = await validateRepositories(repositories);
               
-              // Output repositories as JSON
-              console.log(`::set-output name=repos_json::${JSON.stringify(validRepos)}`);
+              // Output repositories using GITHUB_OUTPUT environment file
+              fs.appendFileSync(process.env.GITHUB_OUTPUT, `repos_json=${JSON.stringify(validRepos)}\n`);
             } catch (error) {
               console.error(`Error in main function: ${error.message}`);
               process.exit(1);
@@ -181,6 +182,7 @@ jobs:
         run: |
           cat > /tmp/github-scripts/get-team-id.js << 'EOF'
           const { Octokit } = require('@octokit/rest');
+          const fs = require('fs');
 
           // Initialize Octokit with GitHub token
           const octokit = new Octokit({
@@ -227,8 +229,8 @@ jobs:
               // Get team ID
               const teamId = await getTeamId();
               
-              // Output team ID
-              console.log(`::set-output name=ccb_team_id::${teamId}`);
+              // Output team ID using GITHUB_OUTPUT environment file
+              fs.appendFileSync(process.env.GITHUB_OUTPUT, `ccb_team_id=${teamId}\n`);
             } catch (error) {
               console.error(`Error in main function: ${error.message}`);
               process.exit(1);
@@ -238,11 +240,6 @@ jobs:
           // Run the main function
           main();
           EOF
-      
-      - name: Install dependencies
-        run: |
-          # Dependencies already installed in the temporary directory
-          echo "Using dependencies installed in /tmp/github-scripts"
       
       - name: Get repositories
         id: get_repos

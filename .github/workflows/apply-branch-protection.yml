@@ -1,4 +1,4 @@
-name: Apply Branch Naming Rules v-0.0.4
+name: Apply Branch Naming Rules v-0.0.5
 
 on:
   workflow_dispatch:
@@ -51,6 +51,7 @@ jobs:
         run: |
           cat > /tmp/apply-branch-naming-rules.js << 'EOF'
           const { Octokit } = require('@octokit/rest');
+          const fs = require('fs');
 
           // Initialize Octokit with GitHub token
           const octokit = new Octokit({
@@ -99,15 +100,12 @@ jobs:
               },
               rules: [
                 {
-                  type: "creation",
+                  type: "branch_name_pattern",
                   parameters: {
-                    prevent_branch_creation: true,
-                    ref_name_pattern: {
-                      name: "Branch naming standard",
-                      negate: true,
-                      pattern: "^((feature|bugfix|release|hotfix)/INC\\d+:.{1,180})$",
-                      operator: "regex"
-                    }
+                    name: "Branch naming standard",
+                    negate: false, 
+                    pattern: "^(feature|bugfix|release|hotfix)/INC\\d+:.{1,180}$",
+                    operator: "regex"
                   }
                 }
               ],
@@ -179,21 +177,18 @@ jobs:
               enforcement: "active",
               conditions: {
                 ref_name: {
-                  include: ["refs/heads/master", "refs/heads/main", "refs/heads/develop"],
+                  include: ["refs/heads/*"],
                   exclude: []
                 }
               },
               rules: [
                 {
-                  type: "creation",
+                  type: "branch_name_pattern",
                   parameters: {
-                    prevent_branch_creation: true,
-                    ref_name_pattern: {
-                      name: "Prevent reserved branch names",
-                      negate: false,
-                      pattern: "^(master|main|develop)$",
-                      operator: "regex"
-                    }
+                    name: "Reserved branch names",
+                    negate: true,
+                    pattern: "^(master|main|develop)$",
+                    operator: "regex"
                   }
                 }
               ],
@@ -305,11 +300,6 @@ jobs:
           // Run the main function
           main();
           EOF
-      
-      - name: Install dependencies
-        run: |
-          # Dependencies already installed in the temporary directory
-          echo "Using dependencies installed in /tmp"
       
       - name: Apply branch naming rules
         env:
