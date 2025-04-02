@@ -1,0 +1,30 @@
+{
+  "id": 3391033,
+  "name": "Branch-Naming-Rule",
+  "target": "branch",
+  "source_type": "Repository",
+  "source": "CityOfLosAngeles/oof-latax-address-validation",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "exclude": [
+        "refs/heads/main",
+        "refs/heads/feature/*",
+        "refs/heads/bugfix/*",
+        "refs/heads/hotfix/*",
+        "refs/heads/release/*",
+        "refs/heads/develop"
+      ],
+      "include": []
+    }
+  },
+  "rules": [
+    {
+      "type": "non_fast_forward"
+    },
+    {
+      "type": "creation"
+    }
+  ],
+  "bypass_actors": []
+}
