@@ -1,0 +1,350 @@
+name: Branch Naming Validation Rule
+
+# This workflow should be placed in oof-latax-ci-cd repository
+# Path: .github/workflows/branch-naming-validation.yml
+
+on:
+  workflow_call:
+    inputs:
+      repositories:
+        description: 'List of repositories (comma-separated, e.g., "repo1,repo2,repo3")'
+        required: false
+        type: string
+      prefix:
+        description: 'Repository prefix to filter by (e.g., "oof-latax-")'
+        required: false
+        default: 'oof-latax-'
+        type: string
+      organization:
+        description: 'GitHub organization name'
+        required: true
+        default: 'CityOfLosAngeles'
+        type: string
+      branch_pattern:
+        description: 'Branch name pattern to enforce (regex)'
+        required: false
+        default: '^(feature|bugfix|release|hotfix)/INC\d+-[a-zA-Z0-9-]{1,30}$|^(main|develop)$'
+        type: string
+      allow_bypass_for_admins:
+        description: 'Allow repository admins to bypass the branch naming rule'
+        required: false
+        default: false
+        type: boolean
+      error_message:
+        description: 'Custom error message to display when branch name is invalid'
+        required: false
+        default: 'Branch name does not follow the required pattern. Branch names must be in the format: feature/INC123-description, bugfix/INC123-description, release/INC123-description, hotfix/INC123-description, main, or develop'
+        type: string
+    secrets:
+      PAT_TOKEN:
+        description: 'Personal Access Token with repo and read:org permissions'
+        required: true
+
+jobs:
+  # Call the reusable base workflow to get repository and team information
+  setup:
+    uses: ./.github/workflows/reusable-base.yml
+    with:
+      repositories: ${{ inputs.repositories }}
+      prefix: ${{ inputs.prefix }}
+      organization: ${{ inputs.organization }}
+    secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+  
+  # Validate branch names against the pattern
+  validate_branch_names:
+    needs: setup
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Create temporary directory and install dependencies
+        run: |
+          mkdir -p /tmp
+          cd /tmp
+          npm init -y
+          npm install @octokit/rest
+      
+      - name: Create branch validation script
+        run: |
+          cat > /tmp/validate-branch-names.js << 'EOF'
+          const { Octokit } = require('@octokit/rest');
+          const fs = require('fs');
+
+          // Initialize Octokit with GitHub token
+          const octokit = new Octokit({
+            auth: process.env.GITHUB_TOKEN,
+          });
+
+          // Get repositories and organization from environment
+          const org = process.env.ORGANIZATION;
+          const repos = JSON.parse(process.env.REPOSITORIES);
+          const branchPattern = new RegExp(process.env.BRANCH_PATTERN);
+          const allowBypassForAdmins = process.env.ALLOW_BYPASS_FOR_ADMINS === 'true';
+          const errorMessage = process.env.ERROR_MESSAGE;
+
+          // Color codes for console output
+          const colors = {
+            red: '\x1b[31m',
+            green: '\x1b[32m',
+            yellow: '\x1b[33m',
+            blue: '\x1b[34m',
+            magenta: '\x1b[35m',
+            reset: '\x1b[0m'
+          };
+
+          // Counters for summary reporting
+          const counters = {
+            totalRepos: repos.length,
+            compliantRepos: 0,
+            nonCompliantRepos: 0,
+            totalBranches: 0,
+            compliantBranches: 0,
+            nonCompliantBranches: 0
+          };
+
+          /**
+           * Check if a user is admin for a repository
+           * @param {string} repo Repository name
+           * @param {string} username GitHub username
+           * @returns {Promise<boolean>} True if user is admin
+           */
+          async function isUserAdmin(repo, username) {
+            try {
+              const response = await octokit.repos.getCollaboratorPermissionLevel({
+                owner: org,
+                repo: repo,
+                username: username
+              });
+              
+              return response.data.permission === 'admin';
+            } catch (error) {
+              console.error(`${colors.red}Error checking admin status: ${error.message}${colors.reset}`);
+              return false;
+            }
+          }
+
+          /**
+           * Get all branches for a repository
+           * @param {string} repo Repository name
+           * @returns {Promise<Array>} List of branches
+           */
+          async function getBranches(repo) {
+            try {
+              const branches = [];
+              let page = 1;
+              let hasMoreBranches = true;
+              
+              while (hasMoreBranches) {
+                const response = await octokit.repos.listBranches({
+                  owner: org,
+                  repo: repo,
+                  per_page: 100,
+                  page: page
+                });
+                
+                branches.push(...response.data);
+                
+                hasMoreBranches = response.data.length === 100;
+                page += 1;
+              }
+              
+              return branches;
+            } catch (error) {
+              console.error(`${colors.red}Error fetching branches for ${repo}: ${error.message}${colors.reset}`);
+              return [];
+            }
+          }
+
+          /**
+           * Validate branch names for a repository
+           * @param {string} repo Repository name
+           * @returns {Promise<Object>} Validation results
+           */
+          async function validateBranchNames(repo) {
+            console.log(`${colors.blue}Checking branch names for ${org}/${repo}${colors.reset}`);
+            
+            const branches = await getBranches(repo);
+            counters.totalBranches += branches.length;
+            
+            const results = {
+              repository: repo,
+              totalBranches: branches.length,
+              compliantBranches: [],
+              nonCompliantBranches: []
+            };
+            
+            for (const branch of branches) {
+              const branchName = branch.name;
+              
+              if (branchPattern.test(branchName)) {
+                results.compliantBranches.push(branchName);
+                counters.compliantBranches++;
+                console.log(`${colors.green}✅ Branch '${branchName}' is compliant${colors.reset}`);
+              } else {
+                results.nonCompliantBranches.push(branchName);
+                counters.nonCompliantBranches++;
+                console.log(`${colors.red}❌ Branch '${branchName}' is not compliant${colors.reset}`);
+              }
+            }
+            
+            return results;
+          }
+
+          /**
+           * Process a single repository
+           * @param {string} repo Repository name
+           */
+          async function processRepository(repo) {
+            console.log(`\n${colors.magenta}🔄 PROCESSING: ${org}/${repo}${colors.reset}`);
+            
+            const results = await validateBranchNames(repo);
+            
+            if (results.nonCompliantBranches.length === 0) {
+              counters.compliantRepos++;
+              console.log(`${colors.green}✅ All ${results.totalBranches} branches in ${org}/${repo} are compliant${colors.reset}`);
+            } else {
+              counters.nonCompliantRepos++;
+              console.log(`${colors.red}❌ Found ${results.nonCompliantBranches.length} non-compliant branches in ${org}/${repo}${colors.reset}`);
+              
+              for (const branchName of results.nonCompliantBranches) {
+                console.log(`${colors.red}   - '${branchName}' does not match pattern${colors.reset}`);
+              }
+            }
+            
+            // Output to GitHub step summary
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\n## Repository: ${org}/${repo}\n\n`);
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `- Total branches: ${results.totalBranches}\n`);
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `- Compliant branches: ${results.compliantBranches.length}\n`);
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `- Non-compliant branches: ${results.nonCompliantBranches.length}\n\n`);
+            
+            if (results.nonCompliantBranches.length > 0) {
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Non-compliant branches:\n\n`);
+              for (const branchName of results.nonCompliantBranches) {
+                fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `- \`${branchName}\`\n`);
+              }
+            }
+            
+            return results;
+          }
+
+          /**
+           * Main function
+           */
+          async function main() {
+            try {
+              console.log(`${colors.blue}Starting branch name validation for ${repos.length} repositories${colors.reset}`);
+              console.log(`${colors.blue}Using pattern: ${branchPattern}${colors.reset}`);
+              
+              // Initialize GitHub step summary
+              fs.writeFileSync(process.env.GITHUB_STEP_SUMMARY, `# Branch Name Validation Results\n\n`);
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `Pattern: \`${branchPattern}\`\n\n`);
+              
+              // Process each repository
+              for (const repo of repos) {
+                await processRepository(repo);
+              }
+              
+              // Print summary
+              console.log(`\n${colors.blue}ℹ️ SUMMARY${colors.reset}`);
+              console.log(`${colors.blue}ℹ️ Total repositories processed: ${counters.totalRepos}${colors.reset}`);
+              console.log(`${colors.green}✅ Repositories with all compliant branches: ${counters.compliantRepos}${colors.reset}`);
+              console.log(`${colors.red}❌ Repositories with non-compliant branches: ${counters.nonCompliantRepos}${colors.reset}`);
+              console.log(`${colors.blue}ℹ️ Total branches checked: ${counters.totalBranches}${colors.reset}`);
+              console.log(`${colors.green}✅ Compliant branches: ${counters.compliantBranches}${colors.reset}`);
+              console.log(`${colors.red}❌ Non-compliant branches: ${counters.nonCompliantBranches}${colors.reset}`);
+              
+              // Add summary to GitHub step summary
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\n## Summary\n\n`);
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `- Total repositories processed: ${counters.totalRepos}\n`);
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `- Repositories with all compliant branches: ${counters.compliantRepos}\n`);
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `- Repositories with non-compliant branches: ${counters.nonCompliantRepos}\n`);
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `- Total branches checked: ${counters.totalBranches}\n`);
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `- Compliant branches: ${counters.compliantBranches}\n`);
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `- Non-compliant branches: ${counters.nonCompliantBranches}\n`);
+              
+              // If any non-compliant branches were found, fail the workflow unless bypass is allowed
+              if (counters.nonCompliantBranches > 0) {
+                console.error(`${colors.red}❌ Found ${counters.nonCompliantBranches} non-compliant branches${colors.reset}`);
+                
+                if (allowBypassForAdmins) {
+                  console.log(`${colors.yellow}⚠️ Branch name validation failed, but bypass is allowed for admins${colors.reset}`);
+                  
+                  // Instead of failing, output a warning message to the job summary
+                  fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\n## ⚠️ Warning\n\n`);
+                  fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${errorMessage}\n\n`);
+                  fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `Admin bypass is enabled. Please remind repository collaborators to follow the branch naming convention.\n`);
+                } else {
+                  console.error(`${colors.red}❌ Branch name validation failed${colors.reset}`);
+                  console.error(`${colors.red}${errorMessage}${colors.reset}`);
+                  
+                  // Add error to GitHub step summary
+                  fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\n## ❌ Error\n\n`);
+                  fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${errorMessage}\n\n`);
+                  
+                  process.exit(1);
+                }
+              } else {
+                console.log(`${colors.green}✅ All branches are compliant${colors.reset}`);
+                
+                // Add success message to GitHub step summary
+                fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\n## ✅ Success\n\n`);
+                fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `All branches follow the required naming pattern.\n`);
+              }
+            } catch (error) {
+              console.error(`${colors.red}❌ Error in main function: ${error.message}${colors.reset}`);
+              process.exit(1);
+            }
+          }
+
+          // Run the main function
+          main();
+          EOF
+      
+      - name: Validate branch names
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+          ORGANIZATION: ${{ inputs.organization }}
+          REPOSITORIES: ${{ needs.setup.outputs.repos_json }}
+          BRANCH_PATTERN: ${{ inputs.branch_pattern }}
+          ALLOW_BYPASS_FOR_ADMINS: ${{ inputs.allow_bypass_for_admins }}
+          ERROR_MESSAGE: ${{ inputs.error_message }}
+        run: |
+          cd /tmp
+          node /tmp/validate-branch-names.js
+
+  # Add check for current branch if this is running on a push/PR event
+  validate_current_branch:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Get branch name
+        id: get-branch
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            BRANCH_NAME="${{ github.head_ref }}"
+          else
+            BRANCH_NAME="${{ github.ref_name }}"
+          fi
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          echo "Branch name: $BRANCH_NAME"
+      
+      - name: Validate current branch name
+        run: |
+          BRANCH_NAME="${{ steps.get-branch.outputs.branch_name }}"
+          PATTERN="${{ inputs.branch_pattern }}"
+          
+          echo "Validating branch name '$BRANCH_NAME' against pattern: $PATTERN"
+          
+          if [[ "$BRANCH_NAME" =~ $PATTERN ]]; then
+            echo "✅ Branch name '$BRANCH_NAME' is valid"
+          else
+            echo "❌ Error: Branch name '$BRANCH_NAME' is invalid"
+            echo "${{ inputs.error_message }}"
+            exit 1
+          fi
