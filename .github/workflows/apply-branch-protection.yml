@@ -104,7 +104,7 @@ jobs:
                   parameters: {
                     name: "Branch naming standard",
                     negate: false, 
-                    pattern: "^(feature|bugfix|release|hotfix)/INC\\d+:.{1,180}$",
+                    pattern: "^(feature|bugfix|release|hotfix)/INC\\d+-[a-zA-Z0-9-]{1,30}$|^(main|develop)$",
                     operator: "regex"
                   }
                 }
