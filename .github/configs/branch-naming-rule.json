@@ -1,0 +1,27 @@
+{
+    "name": "Branch-Naming-Rule",
+    "target": "branch",
+    "enforcement": "active",
+    "conditions": {
+      "ref_name": {
+        "exclude": [
+          "refs/heads/main",
+          "refs/heads/feature/*",
+          "refs/heads/bugfix/*",
+          "refs/heads/hotfix/*",
+          "refs/heads/release/*",
+          "refs/heads/develop"
+        ],
+        "include": []
+      }
+    },
+    "rules": [
+      {
+        "type": "non_fast_forward"
+      },
+      {
+        "type": "creation"
+      }
+    ],
+    "bypass_actors": []
+  }
