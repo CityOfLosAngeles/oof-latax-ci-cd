@@ -1,0 +1,182 @@
+name: Reusable Maven Build and Publish
+
+on:
+  workflow_call:
+    inputs:
+      repository-role:
+        description: 'Repository role: "library", "application", or "both"'
+        required: true
+        type: string
+        default: 'application'
+      dependencies:
+        description: 'Comma-separated list of dependencies to use (e.g., "common-ui,common-server")'
+        required: false
+        type: string
+        default: ''
+      java-version:
+        description: 'Java version to use'
+        required: false
+        type: string
+        default: '8'
+      java-distribution:
+        description: 'Java distribution to use'
+        required: false
+        type: string
+        default: 'temurin'
+      maven-goals:
+        description: 'Maven goals to execute'
+        required: false
+        type: string
+        default: 'clean package'
+      deploy-if-producer:
+        description: 'Whether to deploy if repository is a producer'
+        required: false
+        type: boolean
+        default: true
+      github-packages-url:
+        description: 'GitHub Packages repository URL'
+        required: false
+        type: string
+        default: 'https://maven.pkg.github.com/'
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    
+    # Determine if we should treat this repo as a producer, consumer, or both
+    env:
+      IS_PRODUCER: ${{ inputs.repository-role == 'library' || inputs.repository-role == 'both' }}
+      IS_CONSUMER: ${{ inputs.repository-role == 'application' || inputs.repository-role == 'both' }}
+      ORGANIZATION: ${{ github.repository_owner }}
+      REPO_NAME: ${{ github.repository }}
+      GITHUB_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Important for git history and version calculation
+
+      - name: Set up JDK ${{ inputs.java-version }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: ${{ inputs.java-distribution }}
+          cache: 'maven'
+
+      - name: Set version variables
+        id: versions
+        run: |
+          # Debug info about the context
+          echo "GITHUB_REF: ${GITHUB_REF}"
+          echo "GITHUB_HEAD_REF: ${GITHUB_HEAD_REF}"
+          echo "GITHUB_BASE_REF: ${GITHUB_BASE_REF}"
+          echo "GITHUB_EVENT_NAME: ${GITHUB_EVENT_NAME}"
+          
+          # Determine branch name properly for both pushes and pull requests
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            # For PRs, use the head branch (source branch of the PR)
+            BRANCH_NAME="${GITHUB_HEAD_REF}"
+            echo "Pull request detected, using head branch: ${BRANCH_NAME}"
+          else
+            # For pushes, extract from GITHUB_REF
+            BRANCH_NAME=${GITHUB_REF#refs/heads/}
+            echo "Push detected, using branch: ${BRANCH_NAME}"
+          fi
+          
+          GIT_SHA=$(git rev-parse --short HEAD)
+          POM_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          
+          # Set the identifier based on branch pattern and store locally
+          BRANCH_IDENTIFIER=""
+          if [[ "$BRANCH_NAME" == "develop" ]]; then
+            BRANCH_IDENTIFIER="-SNAPSHOT"
+            echo "Using SNAPSHOT identifier for develop branch - targets DEVELOP and QA environments"
+          elif [[ "$BRANCH_NAME" == release/* || "$BRANCH_NAME" == hotfix/* ]]; then
+            BRANCH_IDENTIFIER="-RC"
+            echo "Using RC identifier for ${BRANCH_NAME} branch - targets UAT and PRODUCTION environments"
+          else
+            echo "WARNING: Branch pattern not recognized: ${BRANCH_NAME}"
+            echo "Defaulting to -UNVERIFIED identifier for tracking"
+            BRANCH_IDENTIFIER="-UNVERIFIED"
+          fi
+          
+          # Set the environment variables for next steps
+          echo "IDENTIFIER=${BRANCH_IDENTIFIER}" >> $GITHUB_ENV
+          echo "VERSION=${POM_VERSION}" >> $GITHUB_ENV
+          echo "GIT_SHA=-${GIT_SHA}" >> $GITHUB_ENV
+          echo "BUILD_NUM=-${GITHUB_RUN_NUMBER}" >> $GITHUB_ENV
+          echo "BRANCH_NAME=${BRANCH_NAME}" >> $GITHUB_ENV
+          
+          # Print final version components for debugging
+          echo "Final version components:"
+          echo "VERSION: ${POM_VERSION}"
+          echo "IDENTIFIER: ${BRANCH_IDENTIFIER}"
+          echo "GIT_SHA: -${GIT_SHA}"
+          echo "BUILD_NUM: -${GITHUB_RUN_NUMBER}"
+
+      # Configure Maven settings.xml for both consuming and producing packages
+      - name: Setup Maven settings.xml
+        run: |
+          mkdir -p ~/.m2
+          
+          echo "<settings>
+            <servers>
+              <server>
+                <id>github</id>
+                <username>${GITHUB_ACTOR}</username>
+                <password>${GITHUB_TOKEN}</password>
+              </server>
+            </servers>
+            <profiles>
+              <profile>
+                <id>github</id>
+                <repositories>
+                  <repository>
+                    <id>github</id>
+                    <url>${{ inputs.github-packages-url }}${ORGANIZATION}</url>
+                    <snapshots><enabled>true</enabled></snapshots>
+                    <releases><enabled>true</enabled></releases>
+                  </repository>
+                </repositories>
+              </profile>
+            </profiles>
+            <activeProfiles>
+              <activeProfile>github</activeProfile>
+            </activeProfiles>
+          </settings>" > ~/.m2/settings.xml
+          
+          # Debug: Check the settings file
+          echo "Maven settings.xml created:"
+          cat ~/.m2/settings.xml
+
+      # Build the project
+      - name: Build with Maven
+        run: |
+          echo "Building with parameters:"
+          echo "  Revision: ${{ env.VERSION }}"
+          echo "  Branch Identifier: ${{ env.IDENTIFIER }}"
+          echo "  SHA: ${{ env.GIT_SHA }}"
+          echo "  Build Number: ${{ env.BUILD_NUM }}"
+          
+          mvn ${{ inputs.maven-goals }} \
+            -Drevision=${{ env.VERSION }} \
+            -DbranchIdentifier=${{ env.IDENTIFIER }} \
+            -Dsha1=${{ env.GIT_SHA }} \
+            -DbuildNumber=${{ env.BUILD_NUM }}
+
+      # Only deploy if this is a producer and it's not a PR
+      - name: Deploy to GitHub Packages
+        if: ${{ env.IS_PRODUCER == 'true' && inputs.deploy-if-producer == 'true' && github.event_name != 'pull_request' && (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/heads/release/') || startsWith(github.ref, 'refs/heads/hotfix/')) }}
+        run: |
+          echo "Publishing artifact to GitHub Packages"
+          
+          mvn deploy \
+            -DskipTests \
+            -Drevision=${{ env.VERSION }} \
+            -DbranchIdentifier=${{ env.IDENTIFIER }} \
+            -Dsha1=${{ env.GIT_SHA }} \
+            -DbuildNumber=${{ env.BUILD_NUM }}
