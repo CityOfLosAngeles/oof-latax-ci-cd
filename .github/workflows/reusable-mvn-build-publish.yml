@@ -3,16 +3,6 @@ name: Reusable Maven Build and Publish
 on:
   workflow_call:
     inputs:
-      repository-role:
-        description: 'Repository role: "library", "application", or "both"'
-        required: true
-        type: string
-        default: 'application'
-      dependencies:
-        description: 'Comma-separated list of dependencies to use (e.g., "common-ui,common-server")'
-        required: false
-        type: string
-        default: ''
       java-version:
         description: 'Java version to use'
         required: false
@@ -28,11 +18,11 @@ on:
         required: false
         type: string
         default: 'clean package'
-      deploy-if-producer:
-        description: 'Whether to deploy if repository is a producer'
+      skip-deploy:
+        description: 'Skip deploying to GitHub Packages'
         required: false
         type: boolean
-        default: true
+        default: false
       github-packages-url:
         description: 'GitHub Packages repository URL'
         required: false
@@ -46,10 +36,7 @@ jobs:
       packages: write
       contents: read
     
-    # Determine if we should treat this repo as a producer, consumer, or both
     env:
-      IS_PRODUCER: ${{ inputs.repository-role == 'library' || inputs.repository-role == 'both' }}
-      IS_CONSUMER: ${{ inputs.repository-role == 'application' || inputs.repository-role == 'both' }}
       ORGANIZATION: ${{ github.repository_owner }}
       REPO_NAME: ${{ github.repository }}
       GITHUB_TOKEN: ${{ github.token }}
@@ -118,7 +105,7 @@ jobs:
           echo "GIT_SHA: -${GIT_SHA}"
           echo "BUILD_NUM: -${GITHUB_RUN_NUMBER}"
 
-      # Configure Maven settings.xml for both consuming and producing packages
+      # Configure Maven settings.xml for GitHub Packages access
       - name: Setup Maven settings.xml
         run: |
           mkdir -p ~/.m2
@@ -168,9 +155,9 @@ jobs:
             -Dsha1=${{ env.GIT_SHA }} \
             -DbuildNumber=${{ env.BUILD_NUM }}
 
-      # Only deploy if this is a producer and it's not a PR
+      # Deploy to GitHub Packages for all repositories except PRs
       - name: Deploy to GitHub Packages
-        if: ${{ env.IS_PRODUCER == 'true' && inputs.deploy-if-producer == 'true' && github.event_name != 'pull_request' && (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/heads/release/') || startsWith(github.ref, 'refs/heads/hotfix/')) }}
+        if: ${{ inputs.skip-deploy != true && github.event_name != 'pull_request' && (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/heads/release/') || startsWith(github.ref, 'refs/heads/hotfix/')) }}
         run: |
           echo "Publishing artifact to GitHub Packages"
           
