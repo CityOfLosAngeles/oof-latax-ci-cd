@@ -175,7 +175,7 @@ jobs:
 
       # Deploy to GitHub Packages for all repositories except PRs
       - name: Deploy to GitHub Packages
-        if: ${{ inputs.skip-deploy != true && github.event_name != 'pull_request' && (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/heads/release/') || startsWith(github.ref, 'refs/heads/hotfix/')) }}
+        if: ${{ inputs.skip-deploy != true && github.event_name != 'pull_request' && (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/heads/release/') || startsWith(github.ref, 'refs/heads/hotfix/') || github.ref == 'refs/heads/main') }}
         run: |
           echo "Publishing artifact to GitHub Packages"
           
