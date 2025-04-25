@@ -180,8 +180,11 @@ jobs:
           echo "Publishing artifact to GitHub Packages"
           
           mvn deploy \
-            -DskipTests \
-            -Drevision=${{ env.VERSION }} \
-            -DbranchIdentifier=${{ env.IDENTIFIER }} \
-            -Dsha1=${{ env.GIT_SHA }} \
-            -DbuildNumber=${{ env.BUILD_NUM }}
+          -DskipTests \
+          -Drevision=${{ env.VERSION }} \
+          -DbranchIdentifier=${{ env.IDENTIFIER }} \
+          -Dsha1=${{ env.GIT_SHA }} \
+          -DbuildNumber=${{ env.BUILD_NUM }} \
+          -Dfile.encoding=UTF-8 \
+          -Dmaven.compiler.encoding=UTF-8 \
+          -Dmaven.compiler.failOnError=false         
