@@ -179,7 +179,7 @@ jobs:
         run: |
           echo "Publishing artifact to GitHub Packages"
           
-          mvn deploy \
+          mvn deploy -X \
           -DskipTests \
           -Drevision=${{ env.VERSION }} \
           -DbranchIdentifier=${{ env.IDENTIFIER }} \
