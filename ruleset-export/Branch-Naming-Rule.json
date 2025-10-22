@@ -13,7 +13,7 @@
         "refs/heads/bugfix/*",
         "refs/heads/hotfix/*",
         "refs/heads/release/*",
-        "refs/heads/develop"
+        "refs/heads/develop/*"
       ],
       "include": []
     }
